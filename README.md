@@ -12,16 +12,18 @@ make
 ```
 
 Usage:
+
+Compile to LLVM IR:
 ```bash
 ./cyaronc input.cyaron output.ll
 ```
 
-Use the LLVM IR to compile to executable file:
+Execute:
 ```bash
-# run the LLVM IR
+# run the LLVM IR directly
 lli output.ll
 # or compile to executable file and run it
-clang++ output.ll -o output
+clang output.ll -o output
 ./output
 ```
 
