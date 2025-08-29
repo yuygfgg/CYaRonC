@@ -28,7 +28,7 @@ clang++ output.ll -o output
 ## Test
 `lli` is required to be in the PATH.
 ```
-python3 test/run_rests.py
+python3 test/run_tests.py
 ```
 
 ## Reference
