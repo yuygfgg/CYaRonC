@@ -478,13 +478,8 @@ vector<Stmt> parse_program_rest() {
                 s.body = parse_block();
                 rest.push_back(std::move(s));
             } else if (starts_with(hdr, "vars")) {
-                ++gPosLine;
-                while (gPosLine < gLines.size()) {
-                    string u = trim(rtrim_cr(gLines[gPosLine]));
-                    ++gPosLine;
-                    if (u == "}")
-                        break;
-                }
+                reportError("Duplicate 'vars' block is not allowed.",
+                            currentLine);
             } else {
                 ++gPosLine;
                 reportError(

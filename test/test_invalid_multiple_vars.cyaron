@@ -1,0 +1,9 @@
+# Duplicate 'vars' block is not allowed.
+{ vars
+    a:int
+}
+:set a, 1
+{ vars
+    b:int
+}
+:yosoro a
