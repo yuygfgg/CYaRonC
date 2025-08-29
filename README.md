@@ -1,6 +1,6 @@
 # CYaRonC
 
-CYaRon language compiler to LLVM IR.
+CYaRon! language compiler to LLVM IR.
 
 ## Usage
 
