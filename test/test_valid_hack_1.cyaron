@@ -1,0 +1,8 @@
+# -233
+{ vars
+  lt:int
+}
+{ ihu gt,lt,8
+  :yosoro 78
+}
+:yosoro -233

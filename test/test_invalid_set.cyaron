@@ -1,0 +1,2 @@
+# Invalid ':set' statement
+:set a, 1, 2

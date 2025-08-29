@@ -1,0 +1,25 @@
+# 981 654 327 819 546 273 657 438 219 576 384 192
+{ vars 
+	MyArray:array[int, 100..150]
+	i:int
+}
+
+:set MyArray[100], 192
+:set MyArray[101], 384
+:set MyArray[102], 576
+:set MyArray[103], 219
+:set MyArray[104], 438
+:set MyArray[105], 657
+:set MyArray[106], 273
+:set MyArray[107], 546
+:set MyArray[108], 819
+:set MyArray[109], 327
+:set MyArray[110], 654
+:set MyArray[111], 981
+
+:set i, 111
+
+{ while ge, i, 100
+	:yosoro MyArray[i]
+	:set i, i - 1
+}

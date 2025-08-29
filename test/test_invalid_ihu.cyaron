@@ -1,0 +1,4 @@
+# Invalid 'ihu' statement
+{ ihu eq, a
+    :yosoro 1
+}
