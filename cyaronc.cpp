@@ -595,7 +595,7 @@ class CodeGenerator {
     llvm::Value* buildExprCore(const std::string& t, bool allowArray,
                                std::size_t line_number);
     llvm::Value* buildCond(CmpOp op, const std::string& a,
-                           const std::string& b);
+                           const std::string& b, std::size_t line_number);
     void codegenBlock(const std::vector<Stmt>& blk);
     void codegenStmt(const Stmt& s);
 };
@@ -681,10 +681,10 @@ llvm::Value* CodeGenerator::buildExprCore(const std::string& t, bool allowArray,
 }
 
 llvm::Value* CodeGenerator::buildCond(CmpOp op, const std::string& a,
-                                      const std::string& b) {
-    // Use line number 0 for comparison expressions (no specific line context)
-    llvm::Value* va = buildExpr(a, true, 0);
-    llvm::Value* vb = buildExpr(b, true, 0);
+                                      const std::string& b,
+                                      std::size_t line_number) {
+    llvm::Value* va = buildExpr(a, true, line_number);
+    llvm::Value* vb = buildExpr(b, true, line_number);
     switch (op) {
     case CmpOp::LT:
         return Builder.CreateICmpSLT(va, vb, "cmplt");
@@ -724,7 +724,7 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
         break;
     }
     case Stmt::Type::IHU: {
-        llvm::Value* cond = buildCond(s.op, s.condA, s.condB);
+        llvm::Value* cond = buildCond(s.op, s.condA, s.condB, s.line_number);
         llvm::BasicBlock* ThenBB =
             llvm::BasicBlock::Create(Ctx, "if.then", MainFn);
         llvm::BasicBlock* MergeBB =
@@ -746,7 +746,7 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
             llvm::BasicBlock::Create(Ctx, "while.end", MainFn);
         Builder.CreateBr(CondBB);
         Builder.SetInsertPoint(CondBB);
-        Builder.CreateCondBr(buildCond(s.op, s.condA, s.condB), BodyBB,
+        Builder.CreateCondBr(buildCond(s.op, s.condA, s.condB, s.line_number), BodyBB,
                              AfterBB);
         Builder.SetInsertPoint(BodyBB);
         codegenBlock(s.body);
