@@ -489,8 +489,8 @@ class CodeGenerator {
         AllocaBuilder.SetInsertPoint(EntryBB, EntryBB->begin());
 
         Printf = Mod->getOrInsertFunction(
-            "printf", llvm::FunctionType::get(
-                          I32, llvm::PointerType::get(Ctx, 0), true));
+            "printf",
+            llvm::FunctionType::get(I32, llvm::PointerType::get(Ctx, 0), true));
         Putchar = Mod->getOrInsertFunction(
             "putchar", llvm::FunctionType::get(I32, I32, false));
     }

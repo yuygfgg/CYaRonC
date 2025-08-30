@@ -37,7 +37,6 @@ def main():
 
     print("--- Running tests ---")
 
-    # Use absolute paths for test files
     test_files = sorted(glob(os.path.join(os.path.abspath(TEST_DIR), "*.cyaron")))
 
     if not test_files:
@@ -48,7 +47,6 @@ def main():
         for test_file in test_files:
             run_single_test(test_file, compiler_path_abs)
     finally:
-        # Cleanup in the script's directory
         if os.path.exists(OUT_LL_FILE):
             os.remove(OUT_LL_FILE)
         if os.path.exists(ERR_LOG_FILE):
@@ -131,6 +129,5 @@ def run_single_test(test_file, compiler_path):
 
 
 if __name__ == "__main__":
-    # Change to the project root directory to ensure paths are correct
     os.chdir(os.path.join(os.path.dirname(__file__), ".."))
     main()
