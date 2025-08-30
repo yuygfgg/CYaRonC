@@ -31,6 +31,10 @@ static constexpr std::string_view IHU_PREFIX = "ihu";
 static constexpr std::string_view HOR_PREFIX = "hor";
 static constexpr std::string_view WHILE_PREFIX = "while";
 static constexpr std::string_view VARS_PREFIX = "vars";
+static constexpr std::string_view SET_PREFIX = ":set";
+static constexpr std::string_view YOSORO_PREFIX = ":yosoro";
+static constexpr std::string_view ARRAY_PREFIX = "array[int,";
+static constexpr std::string_view ARRAY_SUFFIX = "]";
 
 // AST Node Definitions
 enum class CmpOp { LT, GT, LE, GE, EQ, NE };
@@ -254,8 +258,6 @@ class Parser {
         advance();
 
         Stmt s{};
-        static constexpr std::string_view SET_PREFIX = ":set";
-        static constexpr std::string_view YOSORO_PREFIX = ":yosoro";
 
         if (StringUtils::starts_with(t, SET_PREFIX)) {
             std::string rest = StringUtils::trim(t.substr(SET_PREFIX.size()));
@@ -402,8 +404,6 @@ class Parser {
             if (kind == "int") {
                 vd.isArray = false;
             } else {
-                static constexpr std::string_view ARRAY_PREFIX = "array[int,";
-                static constexpr std::string_view ARRAY_SUFFIX = "]";
                 if (StringUtils::starts_with(kind, ARRAY_PREFIX) &&
                     kind.back() == ARRAY_SUFFIX[0]) {
                     std::string inside =
