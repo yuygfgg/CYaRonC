@@ -594,8 +594,8 @@ class CodeGenerator {
                            std::size_t line_number);
     llvm::Value* buildExprCore(const std::string& t, bool allowArray,
                                std::size_t line_number);
-    llvm::Value* buildCond(CmpOp op, const std::string& a,
-                           const std::string& b, std::size_t line_number);
+    llvm::Value* buildCond(CmpOp op, const std::string& a, const std::string& b,
+                           std::size_t line_number);
     void codegenBlock(const std::vector<Stmt>& blk);
     void codegenStmt(const Stmt& s);
 };
@@ -746,8 +746,8 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
             llvm::BasicBlock::Create(Ctx, "while.end", MainFn);
         Builder.CreateBr(CondBB);
         Builder.SetInsertPoint(CondBB);
-        Builder.CreateCondBr(buildCond(s.op, s.condA, s.condB, s.line_number), BodyBB,
-                             AfterBB);
+        Builder.CreateCondBr(buildCond(s.op, s.condA, s.condB, s.line_number),
+                             BodyBB, AfterBB);
         Builder.SetInsertPoint(BodyBB);
         codegenBlock(s.body);
         if (!BodyBB->getTerminator())
