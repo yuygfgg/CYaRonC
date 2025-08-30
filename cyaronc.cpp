@@ -42,6 +42,7 @@ enum class CmpOp { LT, GT, LE, GE, EQ, NE };
 struct Stmt {
     enum class Type { YOSORO, SET, IHU, HOR, WHILE_ };
     Type type;
+    std::size_t line_number;
 
     // YOSORO (print)
     std::string expr;
@@ -258,6 +259,7 @@ class Parser {
         advance();
 
         Stmt s{};
+        s.line_number = line_num;
 
         if (StringUtils::starts_with(t, SET_PREFIX)) {
             std::string rest = StringUtils::trim(t.substr(SET_PREFIX.size()));
@@ -298,6 +300,7 @@ class Parser {
         advance(); // Consume opening brace line
 
         Stmt s{};
+        s.line_number = line_num;
 
         if (StringUtils::starts_with(hdr, IHU_PREFIX)) {
             std::string rest = StringUtils::trim(hdr.substr(IHU_PREFIX.size()));
@@ -588,20 +591,24 @@ class CodeGenerator {
         Builder.CreateStore(v, getArrayElemPtr(name, idxVal));
     }
 
-    llvm::Value* buildExpr(const std::string& s, bool allowArray);
-    llvm::Value* buildExprCore(const std::string& t, bool allowArray);
+    llvm::Value* buildExpr(const std::string& s, bool allowArray,
+                           std::size_t line_number);
+    llvm::Value* buildExprCore(const std::string& t, bool allowArray,
+                               std::size_t line_number);
     llvm::Value* buildCond(CmpOp op, const std::string& a,
                            const std::string& b);
     void codegenBlock(const std::vector<Stmt>& blk);
     void codegenStmt(const Stmt& s);
 };
 
-llvm::Value* CodeGenerator::buildExpr(const std::string& s, bool allowArray) {
-    return buildExprCore(StringUtils::remove_spaces(s), allowArray);
+llvm::Value* CodeGenerator::buildExpr(const std::string& s, bool allowArray,
+                                      std::size_t line_number) {
+    return buildExprCore(StringUtils::remove_spaces(s), allowArray,
+                         line_number);
 }
 
-llvm::Value* CodeGenerator::buildExprCore(const std::string& t,
-                                          bool allowArray) {
+llvm::Value* CodeGenerator::buildExprCore(const std::string& t, bool allowArray,
+                                          std::size_t line_number) {
     std::size_t i = 0, n = t.size();
     llvm::Value* res = nullptr;
     int32_t sign = +1;
@@ -657,8 +664,8 @@ llvm::Value* CodeGenerator::buildExprCore(const std::string& t,
                             d--;
                         j++;
                     }
-                    llvm::Value* idxVal =
-                        buildExpr(t.substr(start, j - 1 - start), false);
+                    llvm::Value* idxVal = buildExpr(
+                        t.substr(start, j - 1 - start), false, line_number);
                     i = j;
                     applySignAndAcc(loadArrayElem(name, idxVal));
                 }
@@ -666,7 +673,9 @@ llvm::Value* CodeGenerator::buildExprCore(const std::string& t,
                 applySignAndAcc(loadScalar(name));
             }
         } else {
-            ++i;
+            reportError(std::format("Unknown token '{}' in expression",
+                                    std::string(1, t[i])),
+                        line_number);
         }
     }
     return res ? res : C0_64;
@@ -674,8 +683,9 @@ llvm::Value* CodeGenerator::buildExprCore(const std::string& t,
 
 llvm::Value* CodeGenerator::buildCond(CmpOp op, const std::string& a,
                                       const std::string& b) {
-    llvm::Value* va = buildExpr(a, true);
-    llvm::Value* vb = buildExpr(b, true);
+    // Use line number 0 for comparison expressions (no specific line context)
+    llvm::Value* va = buildExpr(a, true, 0);
+    llvm::Value* vb = buildExpr(b, true, 0);
     switch (op) {
     case CmpOp::LT:
         return Builder.CreateICmpSLT(va, vb, "cmplt");
@@ -702,12 +712,12 @@ void CodeGenerator::codegenBlock(const std::vector<Stmt>& blk) {
 void CodeGenerator::codegenStmt(const Stmt& s) {
     switch (s.type) {
     case Stmt::Type::YOSORO:
-        emitPrintI64(buildExpr(s.expr, true));
+        emitPrintI64(buildExpr(s.expr, true, s.line_number));
         break;
     case Stmt::Type::SET: {
-        llvm::Value* rhs = buildExpr(s.rhsExpr, true);
+        llvm::Value* rhs = buildExpr(s.rhsExpr, true, s.line_number);
         if (s.lhsIsArray) {
-            llvm::Value* idx = buildExpr(s.lhsIndexExpr, false);
+            llvm::Value* idx = buildExpr(s.lhsIndexExpr, false, s.line_number);
             storeArrayElem(s.lhsName, idx, rhs);
         } else {
             storeScalar(s.lhsName, rhs);
@@ -747,20 +757,22 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
         break;
     }
     case Stmt::Type::HOR: {
-        llvm::Value* startVal = buildExpr(s.forStart, true);
-        llvm::Value* endVal = buildExpr(s.forEnd, true);
+        llvm::Value* startVal = buildExpr(s.forStart, true, s.line_number);
+        llvm::Value* endVal = buildExpr(s.forEnd, true, s.line_number);
 
         auto storeLoopVar = [&](llvm::Value* v) {
             if (s.forVarIsArray)
-                storeArrayElem(s.forVarName,
-                               buildExpr(s.forVarIndexExpr, false), v);
+                storeArrayElem(
+                    s.forVarName,
+                    buildExpr(s.forVarIndexExpr, false, s.line_number), v);
             else
                 storeScalar(s.forVarName, v);
         };
         auto loadLoopVar = [&]() {
             if (s.forVarIsArray)
-                return loadArrayElem(s.forVarName,
-                                     buildExpr(s.forVarIndexExpr, false));
+                return loadArrayElem(
+                    s.forVarName,
+                    buildExpr(s.forVarIndexExpr, false, s.line_number));
             return loadScalar(s.forVarName);
         };
 
