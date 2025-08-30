@@ -5,7 +5,6 @@
 #include <format>
 #include <fstream>
 #include <iostream>
-#include <memory>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -491,7 +490,7 @@ class CodeGenerator {
 
         Printf = Mod->getOrInsertFunction(
             "printf", llvm::FunctionType::get(
-                          I32, llvm::PointerType::getUnqual(I8), true));
+                          I32, llvm::PointerType::get(Ctx, 0), true));
         Putchar = Mod->getOrInsertFunction(
             "putchar", llvm::FunctionType::get(I32, I32, false));
     }

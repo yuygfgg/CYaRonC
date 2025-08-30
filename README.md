@@ -7,7 +7,7 @@ CYaRon! language compiler to LLVM IR.
 Build:
 ```bash
 mkdir -p build && cd build
-cmake ..
+cmake -DCMAKE_BUILD_TYPE=Release ..
 make
 ```
 
