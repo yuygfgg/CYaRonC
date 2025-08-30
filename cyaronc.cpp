@@ -5,6 +5,14 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -17,24 +25,55 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
-#include <string>
-#include <system_error>
-#include <unordered_map>
-#include <utility>
-#include <vector>
 
-using namespace std;
-using namespace llvm;
+// Constants
+static constexpr std::string_view IHU_PREFIX = "ihu";
+static constexpr std::string_view HOR_PREFIX = "hor";
+static constexpr std::string_view WHILE_PREFIX = "while";
+static constexpr std::string_view VARS_PREFIX = "vars";
 
-// Error reporting
-[[noreturn]] void reportError(const string& message, size_t line_number,
-                              raw_ostream* OS = &errs()) {
-    *OS << std::format("Error on line {}: {}\n", line_number, message);
-    exit(1);
-}
+// AST Node Definitions
+enum class CmpOp { LT, GT, LE, GE, EQ, NE };
 
-// String utilities
-static inline string rtrim_cr(string s) {
+struct Stmt {
+    enum class Type { YOSORO, SET, IHU, HOR, WHILE_ };
+    Type type;
+
+    // YOSORO (print)
+    std::string expr;
+
+    // SET (assignment)
+    std::string lhsName;
+    bool lhsIsArray = false;
+    std::string lhsIndexExpr;
+    std::string rhsExpr;
+
+    // IHU (if) / WHILE
+    CmpOp op;
+    std::string condA, condB;
+    std::vector<Stmt> body;
+
+    // HOR (for)
+    std::string forVarName;
+    bool forVarIsArray = false;
+    std::string forVarIndexExpr;
+    std::string forStart, forEnd;
+};
+
+struct VarDecl {
+    std::string name;
+    bool isArray = false;
+    int64_t L = 0, R = -1;
+};
+
+struct Program {
+    std::vector<VarDecl> varDecls;
+    std::vector<Stmt> stmts;
+};
+
+// Utility Functions
+namespace StringUtils {
+static inline std::string rtrim_cr(std::string s) {
     if (!s.empty() && (s.back() == '\r' || s.back() == '\n')) {
         while (!s.empty() && (s.back() == '\r' || s.back() == '\n'))
             s.pop_back();
@@ -42,71 +81,33 @@ static inline string rtrim_cr(string s) {
     return s;
 }
 
-static inline string trim(const string& s) {
-    size_t i = 0, j = s.size();
-    while (i < j && isspace(static_cast<unsigned char>(s[i])))
+static inline std::string trim(const std::string& s) {
+    std::size_t i = 0, j = s.size();
+    while (i < j && std::isspace(static_cast<unsigned char>(s[i])))
         ++i;
-    while (j > i && isspace(static_cast<unsigned char>(s[j - 1])))
+    while (j > i && std::isspace(static_cast<unsigned char>(s[j - 1])))
         --j;
     return s.substr(i, j - i);
 }
 
-static inline bool starts_with(const string& s, const string& p) {
+static inline bool starts_with(const std::string& s, std::string_view p) {
     return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
 }
 
-static inline string remove_spaces(const string& s) {
-    string t;
+static inline std::string remove_spaces(const std::string& s) {
+    std::string t;
     t.reserve(s.size());
     for (unsigned char c : s)
-        if (!isspace(static_cast<unsigned char>(c)))
+        if (!std::isspace(static_cast<unsigned char>(c)))
             t.push_back(c);
     return t;
 }
 
-// AST
-enum CmpOp { LT, GT, LE, GE, EQ, NE };
-
-struct Stmt {
-    enum Type { YOSORO, SET, IHU, HOR, WHILE_ } type;
-    // YOSORO: print
-    // SET: assign
-    // IHU: if
-    // HOR: for
-    // WHILE_: while
-
-    // YOSORO
-    string expr;
-
-    // SET
-    string lhsName;
-    bool lhsIsArray = false;
-    string lhsIndexExpr;
-    string rhsExpr;
-
-    // IF / WHILE
-    CmpOp op;
-    string condA, condB;
-    vector<Stmt> body;
-
-    // FOR
-    string forVarName;
-    bool forVarIsArray = false;
-    string forVarIndexExpr;
-    string forStart, forEnd;
-};
-
-// Parsing
-vector<string> gLines;
-size_t gPosLine = 0;
-
-vector<Stmt> parse_block(); // forward
-
-vector<string> split_by_commas_no_space(const string& s,
-                                        [[maybe_unused]] size_t expectedParts) {
-    vector<string> parts;
-    size_t i = 0, n = s.size();
-    size_t last = 0;
+static inline std::vector<std::string>
+split_by_commas_no_space(const std::string& s) {
+    std::vector<std::string> parts;
+    std::size_t i = 0, n = s.size();
+    std::size_t last = 0;
     while (i <= n) {
         if (i == n || s[i] == ',') {
             parts.push_back(s.substr(last, i - last));
@@ -114,541 +115,501 @@ vector<string> split_by_commas_no_space(const string& s,
         }
         ++i;
     }
-    // assert(expectedParts == 0 || expectedParts == parts.size());
     return parts;
 }
+} // namespace StringUtils
 
-CmpOp parse_op(const string& s, size_t line_num) {
-    if (s == "lt")
-        return LT;
-    if (s == "gt")
-        return GT;
-    if (s == "le")
-        return LE;
-    if (s == "ge")
-        return GE;
-    if (s == "eq")
-        return EQ;
-    if (s == "neq")
-        return NE;
-    reportError(std::format("Invalid comparison operator '{}'", s), line_num);
+// Error Reporting
+[[noreturn]] void reportError(const std::string& message,
+                              std::size_t line_number,
+                              llvm::raw_ostream* OS = &llvm::errs()) {
+    *OS << std::format("Error on line {}: {}\n", line_number, message);
+    std::exit(1);
 }
 
-Stmt parse_stmt_one() {
-    size_t currentLine = gPosLine + 1;
-    string raw = rtrim_cr(gLines[gPosLine]);
-    string t = trim(raw);
-    ++gPosLine;
-    Stmt s{};
-    if (starts_with(t, ":yosoro")) {
-        string rest = trim(t.substr(7));
-        s.type = Stmt::YOSORO;
-        s.expr = rest;
-    } else if (starts_with(t, ":set")) {
-        string rest = trim(t.substr(4));
-        string rs = remove_spaces(rest);
-        auto parts = split_by_commas_no_space(rs, 2);
-        if (parts.size() != 2)
+// Parser
+class Parser {
+  public:
+    explicit Parser(std::vector<std::string> lines)
+        : lines_(std::move(lines)), pos_(0) {}
+
+    Program parse_program() {
+        Program prog;
+        prog.varDecls = parse_vars_block_if_present();
+        prog.stmts = parse_body(true);
+        return prog;
+    }
+
+  private:
+    std::vector<std::string> lines_;
+    std::size_t pos_;
+
+    struct VarRef {
+        std::string name;
+        bool isArray = false;
+        std::string indexExpr;
+    };
+
+    // Parsing Primitives
+    bool eof() const { return pos_ >= lines_.size(); }
+    std::size_t current_line_num() const { return pos_ + 1; }
+    const std::string& current_line() { return lines_[pos_]; }
+    void advance() { ++pos_; }
+
+    CmpOp parse_op(const std::string& s) {
+        if (s == "lt")
+            return CmpOp::LT;
+        if (s == "gt")
+            return CmpOp::GT;
+        if (s == "le")
+            return CmpOp::LE;
+        if (s == "ge")
+            return CmpOp::GE;
+        if (s == "eq")
+            return CmpOp::EQ;
+        if (s == "neq")
+            return CmpOp::NE;
+        reportError(std::format("Invalid comparison operator '{}'", s),
+                    current_line_num());
+    }
+
+    VarRef parse_var_ref(const std::string& s) {
+        VarRef ref;
+        std::size_t lb = s.find('[');
+        if (lb == std::string::npos) {
+            ref.name = s;
+            ref.isArray = false;
+        } else {
+            ref.name = s.substr(0, lb);
+            std::size_t rb = s.rfind(']');
+            if (rb == std::string::npos || rb <= lb)
+                reportError("Mismatched brackets in variable access.",
+                            current_line_num());
+            ref.isArray = true;
+            ref.indexExpr = s.substr(lb + 1, rb - lb - 1);
+            if (ref.indexExpr.empty())
+                reportError("Empty index in array access.", current_line_num());
+        }
+        return ref;
+    }
+
+    int64_t parse_int_literal(const std::string& str) {
+        if (str.empty())
+            reportError("Empty number in array range.", current_line_num());
+        int32_t sign = 1;
+        std::size_t i = 0;
+        if (str[0] == '+') {
+            i = 1;
+        } else if (str[0] == '-') {
+            sign = -1;
+            i = 1;
+        }
+        if (i == str.size())
+            reportError(std::format("Invalid number in array range: {}\n", str),
+                        current_line_num());
+        int64_t v = 0;
+        for (; i < str.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(str[i])))
+                reportError(
+                    std::format("Invalid number in array range: {}\n", str),
+                    current_line_num());
+            v = v * 10 + (str[i] - '0');
+        }
+        return sign * v;
+    }
+
+    // Statement Parsers
+    std::vector<Stmt> parse_body(bool is_top_level) {
+        std::vector<Stmt> body;
+        while (!eof()) {
+            std::string t =
+                StringUtils::trim(StringUtils::rtrim_cr(current_line()));
+
+            if (t.empty()) {
+                advance();
+                continue;
+            }
+            if (t == "}") {
+                if (is_top_level) {
+                    reportError("Unexpected '}' at top level.",
+                                current_line_num());
+                }
+                advance();
+                break;
+            }
+
+            if (t[0] == '{') {
+                body.push_back(parse_block_stmt());
+            } else {
+                body.push_back(parse_simple_stmt());
+            }
+        }
+        return body;
+    }
+
+    Stmt parse_simple_stmt() {
+        std::size_t line_num = current_line_num();
+        std::string t =
+            StringUtils::trim(StringUtils::rtrim_cr(current_line()));
+        advance();
+
+        Stmt s{};
+        static constexpr std::string_view SET_PREFIX = ":set";
+        static constexpr std::string_view YOSORO_PREFIX = ":yosoro";
+
+        if (StringUtils::starts_with(t, SET_PREFIX)) {
+            std::string rest = StringUtils::trim(t.substr(SET_PREFIX.size()));
+            std::string rs = StringUtils::remove_spaces(rest);
+            auto parts = StringUtils::split_by_commas_no_space(rs);
+            if (parts.size() != 2)
+                reportError(
+                    "Invalid ':set' statement. Expected ':set <lhs>, <rhs>'.",
+                    line_num);
+
+            if (parts[0].empty())
+                reportError("Missing left-hand side in ':set' statement.",
+                            line_num);
+            if (parts[1].empty())
+                reportError("Missing right-hand side in ':set' statement.",
+                            line_num);
+
+            s.type = Stmt::Type::SET;
+            VarRef lhs = parse_var_ref(parts[0]);
+            s.lhsName = lhs.name;
+            s.lhsIsArray = lhs.isArray;
+            s.lhsIndexExpr = lhs.indexExpr;
+            s.rhsExpr = parts[1];
+
+        } else if (StringUtils::starts_with(t, YOSORO_PREFIX)) {
+            s.type = Stmt::Type::YOSORO;
+            s.expr = StringUtils::trim(t.substr(YOSORO_PREFIX.size()));
+        } else {
+            reportError(std::format("Unknown statement: {}\n", t), line_num);
+        }
+        return s;
+    }
+
+    Stmt parse_block_stmt() {
+        std::size_t line_num = current_line_num();
+        std::string hdr =
+            StringUtils::trim(StringUtils::rtrim_cr(current_line()).substr(1));
+        advance(); // Consume opening brace line
+
+        Stmt s{};
+
+        if (StringUtils::starts_with(hdr, IHU_PREFIX)) {
+            std::string rest = StringUtils::trim(hdr.substr(IHU_PREFIX.size()));
+            auto parts = StringUtils::split_by_commas_no_space(
+                StringUtils::remove_spaces(rest));
+            if (parts.size() != 3)
+                reportError("Invalid 'ihu' statement. Expected '{ihu <op>, "
+                            "<expr1>, <expr2>}'.",
+                            line_num);
+            s.type = Stmt::Type::IHU;
+            s.op = parse_op(parts[0]);
+            s.condA = parts[1];
+            s.condB = parts[2];
+            s.body = parse_body(false);
+        } else if (StringUtils::starts_with(hdr, HOR_PREFIX)) {
+            std::string rest = StringUtils::trim(hdr.substr(HOR_PREFIX.size()));
+            auto parts = StringUtils::split_by_commas_no_space(
+                StringUtils::remove_spaces(rest));
+            if (parts.size() != 3)
+                reportError("Invalid 'hor' statement. Expected '{hor <var>, "
+                            "<start>, <end>}'.",
+                            line_num);
+            s.type = Stmt::Type::HOR;
+            VarRef v = parse_var_ref(parts[0]);
+            s.forVarName = v.name;
+            s.forVarIsArray = v.isArray;
+            s.forVarIndexExpr = v.indexExpr;
+            s.forStart = parts[1];
+            s.forEnd = parts[2];
+            s.body = parse_body(false);
+        } else if (StringUtils::starts_with(hdr, WHILE_PREFIX)) {
+            std::string rest =
+                StringUtils::trim(hdr.substr(WHILE_PREFIX.size()));
+            auto parts = StringUtils::split_by_commas_no_space(
+                StringUtils::remove_spaces(rest));
+            if (parts.size() != 3)
+                reportError("Invalid 'while' statement. Expected '{while <op>, "
+                            "<expr1>, <expr2>}'.",
+                            line_num);
+            s.type = Stmt::Type::WHILE_;
+            s.op = parse_op(parts[0]);
+            s.condA = parts[1];
+            s.condB = parts[2];
+            s.body = parse_body(false);
+        } else if (StringUtils::starts_with(hdr, VARS_PREFIX)) {
+            reportError("Duplicate 'vars' block is not allowed.", line_num);
+        } else {
             reportError(
-                "Invalid ':set' statement. Expected ':set <lhs>, <rhs>'.",
-                currentLine);
-
-        string lhs = parts[0];
-        string rhs = parts[1];
-
-        if (lhs.empty())
-            reportError("Missing left-hand side in ':set' statement.",
-                        currentLine);
-        if (rhs.empty())
-            reportError("Missing right-hand side in ':set' statement.",
-                        currentLine);
-
-        s.type = Stmt::SET;
-        size_t lb = lhs.find('[');
-        if (lb == string::npos) {
-            s.lhsName = lhs;
-            s.lhsIsArray = false;
-        } else {
-            s.lhsName = lhs.substr(0, lb);
-            size_t rb = lhs.rfind(']');
-            if (rb == string::npos || rb <= lb)
-                reportError("Mismatched brackets in array access.",
-                            currentLine);
-            s.lhsIsArray = true;
-            s.lhsIndexExpr = lhs.substr(lb + 1, rb - lb - 1);
-            if (s.lhsIndexExpr.empty())
-                reportError("Empty index in array access.", currentLine);
+                std::format("Unknown block type starting with '{}'\n", hdr),
+                line_num);
         }
-        s.rhsExpr = rhs;
-    } else {
-        reportError(std::format("Unknown statement: {}", t), currentLine);
+        return s;
     }
-    return s;
-}
 
-vector<Stmt> parse_block() {
-    vector<Stmt> body;
-    while (gPosLine < gLines.size()) {
-        size_t currentLine = gPosLine + 1;
-        string raw = rtrim_cr(gLines[gPosLine]);
-        string t = trim(raw);
-        if (t.empty()) {
-            ++gPosLine;
-            continue;
+    std::vector<VarDecl> parse_vars_block_if_present() {
+        while (!eof() && StringUtils::trim(current_line()).empty()) {
+            advance();
         }
-        if (t == "}") {
-            ++gPosLine;
-            break;
-        }
+        if (eof())
+            return {};
 
-        if (t[0] == '{') {
-            string hdr = trim(t.substr(1));
-            if (starts_with(hdr, "ihu")) {
-                string rest = trim(hdr.substr(3));
-                string rs = remove_spaces(rest);
-                auto parts = split_by_commas_no_space(rs, 3);
-                if (parts.size() != 3)
-                    reportError("Invalid 'ihu' statement. Expected '{ihu <op>, "
-                                "<expr1>, <expr2>}'.",
-                                currentLine);
-                Stmt s;
-                s.type = Stmt::IHU;
-                s.op = parse_op(parts[0], currentLine);
-                s.condA = parts[1];
-                s.condB = parts[2];
-                ++gPosLine;
-                s.body = parse_block();
-                body.push_back(std::move(s));
-            } else if (starts_with(hdr, "hor")) {
-                string rest = trim(hdr.substr(3));
-                string rs = remove_spaces(rest);
-                auto parts = split_by_commas_no_space(rs, 3);
-                if (parts.size() != 3)
-                    reportError("Invalid 'hor' statement. Expected '{hor "
-                                "<var>, <start>, "
-                                "<end>}'.",
-                                currentLine);
-                Stmt s{};
-                s.type = Stmt::HOR;
-                string forVarLhs = parts[0];
-                size_t lb = forVarLhs.find('[');
-                if (lb == string::npos) {
-                    s.forVarName = forVarLhs;
-                } else {
-                    s.forVarName = forVarLhs.substr(0, lb);
-                    size_t rb = forVarLhs.rfind(']');
-                    if (rb == string::npos || rb <= lb)
-                        reportError("Mismatched brackets in for loop variable.",
-                                    currentLine);
-                    s.forVarIsArray = true;
-                    s.forVarIndexExpr = forVarLhs.substr(lb + 1, rb - lb - 1);
-                    if (s.forVarIndexExpr.empty())
-                        reportError("Empty index in for loop variable.",
-                                    currentLine);
-                }
-                s.forStart = parts[1];
-                s.forEnd = parts[2];
-                ++gPosLine;
-                s.body = parse_block();
-                body.push_back(std::move(s));
-            } else if (starts_with(hdr, "while")) {
-                string rest = trim(hdr.substr(5));
-                string rs = remove_spaces(rest);
-                auto parts = split_by_commas_no_space(rs, 3);
-                if (parts.size() != 3)
-                    reportError(
-                        "Invalid 'while' statement. Expected '{while <op>, "
-                        "<expr1>, <expr2>}'.",
-                        currentLine);
-                Stmt s;
-                s.type = Stmt::WHILE_;
-                s.op = parse_op(parts[0], currentLine);
-                s.condA = parts[1];
-                s.condB = parts[2];
-                ++gPosLine;
-                s.body = parse_block();
-                body.push_back(std::move(s));
-            } else if (starts_with(hdr, "vars")) {
-                ++gPosLine;
-                while (gPosLine < gLines.size()) {
-                    string u = trim(rtrim_cr(gLines[gPosLine]));
-                    ++gPosLine;
-                    if (u == "}")
-                        break;
-                }
-            } else {
-                ++gPosLine; // unknown
-                reportError(
-                    std::format("Unknown block type starting with '{}'", hdr),
-                    currentLine);
+        std::string t =
+            StringUtils::trim(StringUtils::rtrim_cr(current_line()));
+        if (t.empty() || t[0] != '{')
+            return {};
+
+        std::string hdr = StringUtils::trim(t.substr(1));
+        if (!StringUtils::starts_with(hdr, VARS_PREFIX)) {
+            if (StringUtils::starts_with(hdr, "ihu") ||
+                StringUtils::starts_with(hdr, "hor") ||
+                StringUtils::starts_with(hdr, "while")) {
+                // It's a regular block, not a vars block.
+                return {};
             }
-        } else {
-            Stmt s = parse_stmt_one();
-            if (s.type == Stmt::YOSORO || s.type == Stmt::SET)
-                body.push_back(std::move(s));
+            reportError("Duplicate 'vars' block is not allowed, or invalid "
+                        "block at top level.",
+                        current_line_num());
         }
-    }
-    return body;
-}
 
-// Vars block
-struct VarDecl {
-    string name;
-    bool isArray = false;
-    int64_t L = 0, R = -1;
-};
+        advance(); // Consume '{vars' line
 
-vector<VarDecl> parse_vars_block(vector<string>& lines, size_t& pos) {
-    vector<VarDecl> decls;
-    while (pos < lines.size()) {
-        string t = trim(rtrim_cr(lines[pos]));
-        if (t.empty()) {
-            ++pos;
-            continue;
-        }
-        if (t.size() && t[0] == '{') {
-            string hdr = trim(t.substr(1));
-            if (starts_with(hdr, "vars")) {
-                ++pos;
-                while (pos < lines.size()) {
-                    size_t varLine = pos + 1;
-                    string raw = rtrim_cr(lines[pos]);
-                    string s = trim(raw);
-                    ++pos;
-                    if (s == "}")
-                        break;
-                    if (s.empty())
-                        continue;
-                    string u = remove_spaces(s);
-                    size_t colon = u.find(':');
-                    if (colon == string::npos)
-                        reportError("Invalid variable declaration. Expected "
-                                    "'<name>:<type>'.",
-                                    varLine);
-                    string name = u.substr(0, colon);
-                    string kind = u.substr(colon + 1);
-                    VarDecl vd;
-                    vd.name = name;
-                    if (kind == "int") {
-                        vd.isArray = false;
-                    } else {
-                        const string prefix = "array[int,";
-                        if (starts_with(kind, prefix) && !kind.empty() &&
-                            kind.back() == ']') {
-                            string inside = kind.substr(
-                                prefix.size(), kind.size() - prefix.size() - 1);
-                            size_t dots = inside.find("..");
-                            if (dots == string::npos)
-                                reportError(
-                                    "Invalid array range in declaration. "
-                                    "Expected 'L..R'.",
-                                    varLine);
-                            string lstr = inside.substr(0, dots);
-                            string rstr = inside.substr(dots + 2);
-                            auto parse_int = [&](const string& str) -> int64_t {
-                                if (str.empty())
-                                    reportError("Empty number in array range.",
-                                                varLine);
-                                int32_t sign = 1;
-                                size_t i = 0;
-                                if (str[0] == '+') {
-                                    sign = 1;
-                                    i = 1;
-                                } else if (str[0] == '-') {
-                                    sign = -1;
-                                    i = 1;
-                                }
-                                if (i == str.size())
-                                    reportError(
-                                        std::format(
-                                            "Invalid number in array range: {}",
-                                            str),
-                                        varLine);
-                                int64_t v = 0;
-                                for (; i < str.size(); ++i) {
-                                    if (!isdigit(
-                                            static_cast<unsigned char>(str[i])))
-                                        reportError(
-                                            std::format("Invalid number in "
-                                                        "array range: {}",
-                                                        str),
-                                            varLine);
-                                    v = v * 10 + (str[i] - '0');
-                                }
-                                return sign * v;
-                            };
-                            vd.isArray = true;
-                            vd.L = parse_int(lstr);
-                            vd.R = parse_int(rstr);
-                        } else {
-                            reportError(
-                                std::format("Invalid type '{}'. Expected 'int' "
-                                            "or 'array[int,L..R]'.",
+        std::vector<VarDecl> decls;
+        while (!eof()) {
+            std::size_t var_line_num = current_line_num();
+            std::string s =
+                StringUtils::trim(StringUtils::rtrim_cr(current_line()));
+            advance();
+
+            if (s == "}")
+                break;
+            if (s.empty())
+                continue;
+
+            std::size_t colon = s.find(':');
+            if (colon == std::string::npos)
+                reportError(
+                    "Invalid variable declaration. Expected '<name>:<type>'.",
+                    var_line_num);
+
+            VarDecl vd;
+            vd.name = StringUtils::trim(s.substr(0, colon));
+            std::string kind = StringUtils::trim(s.substr(colon + 1));
+
+            if (kind == "int") {
+                vd.isArray = false;
+            } else {
+                static constexpr std::string_view ARRAY_PREFIX = "array[int,";
+                static constexpr std::string_view ARRAY_SUFFIX = "]";
+                if (StringUtils::starts_with(kind, ARRAY_PREFIX) &&
+                    kind.back() == ARRAY_SUFFIX[0]) {
+                    std::string inside =
+                        kind.substr(ARRAY_PREFIX.size(),
+                                    kind.size() - ARRAY_PREFIX.size() - 1);
+                    std::size_t dots = inside.find("..");
+                    if (dots == std::string::npos)
+                        reportError("Invalid array range. Expected 'L..R'.",
+                                    var_line_num);
+
+                    vd.isArray = true;
+                    std::string lstr =
+                        StringUtils::trim(inside.substr(0, dots));
+                    std::string rstr =
+                        StringUtils::trim(inside.substr(dots + 2));
+
+                    if (lstr.empty() || rstr.empty())
+                        reportError("Invalid array range. Expected 'L..R'.",
+                                    var_line_num);
+
+                    vd.L = parse_int_literal(lstr);
+                    vd.R = parse_int_literal(rstr);
+                } else {
+                    reportError(std::format("Invalid type '{}'. Expected 'int' "
+                                            "or 'array[int,L..R]'.\n",
                                             kind),
-                                varLine);
-                        }
-                    }
-                    decls.push_back(std::move(vd));
+                                var_line_num);
                 }
             }
+            decls.push_back(std::move(vd));
         }
-        break;
+        return decls;
     }
-    return decls;
-}
-
-vector<Stmt> parse_program_rest() {
-    vector<Stmt> rest;
-    while (gPosLine < gLines.size()) {
-        size_t currentLine = gPosLine + 1;
-        string raw = rtrim_cr(gLines[gPosLine]);
-        string t = trim(raw);
-        if (t.empty()) {
-            ++gPosLine;
-            continue;
-        }
-        if (t == "}") {
-            ++gPosLine;
-            continue;
-        }
-        if (t[0] == '{') {
-            string hdr = trim(t.substr(1));
-            if (starts_with(hdr, "ihu")) {
-                string restStr = trim(hdr.substr(3));
-                string rs = remove_spaces(restStr);
-                auto parts = split_by_commas_no_space(rs, 3);
-                if (parts.size() != 3)
-                    reportError("Invalid 'ihu' statement. Expected '{ihu <op>, "
-                                "<expr1>, <expr2>}'.",
-                                currentLine);
-                Stmt s;
-                s.type = Stmt::IHU;
-                s.op = parse_op(parts[0], currentLine);
-                s.condA = parts[1];
-                s.condB = parts[2];
-                ++gPosLine;
-                s.body = parse_block();
-                rest.push_back(std::move(s));
-            } else if (starts_with(hdr, "hor")) {
-                string restStr = trim(hdr.substr(3));
-                string rs = remove_spaces(restStr);
-                auto parts = split_by_commas_no_space(rs, 3);
-                if (parts.size() != 3)
-                    reportError("Invalid 'hor' statement. Expected '{hor "
-                                "<var>, <start>, <end>}'.",
-                                currentLine);
-                Stmt s{};
-                s.type = Stmt::HOR;
-                string forVarLhs = parts[0];
-                size_t lb = forVarLhs.find('[');
-                if (lb == string::npos) {
-                    s.forVarName = forVarLhs;
-                } else {
-                    s.forVarName = forVarLhs.substr(0, lb);
-                    size_t rb = forVarLhs.rfind(']');
-                    if (rb == string::npos || rb <= lb)
-                        reportError("Mismatched brackets in for loop variable.",
-                                    currentLine);
-                    s.forVarIsArray = true;
-                    s.forVarIndexExpr = forVarLhs.substr(lb + 1, rb - lb - 1);
-                    if (s.forVarIndexExpr.empty())
-                        reportError("Empty index in for loop variable.",
-                                    currentLine);
-                }
-                s.forStart = parts[1];
-                s.forEnd = parts[2];
-                ++gPosLine;
-                s.body = parse_block();
-                rest.push_back(std::move(s));
-            } else if (starts_with(hdr, "while")) {
-                string restStr = trim(hdr.substr(5));
-                string rs = remove_spaces(restStr);
-                auto parts = split_by_commas_no_space(rs, 3);
-                if (parts.size() != 3)
-                    reportError(
-                        "Invalid 'while' statement. Expected '{while <op>, "
-                        "<expr1>, <expr2>}'.",
-                        currentLine);
-                Stmt s;
-                s.type = Stmt::WHILE_;
-                s.op = parse_op(parts[0], currentLine);
-                s.condA = parts[1];
-                s.condB = parts[2];
-                ++gPosLine;
-                s.body = parse_block();
-                rest.push_back(std::move(s));
-            } else if (starts_with(hdr, "vars")) {
-                reportError("Duplicate 'vars' block is not allowed.",
-                            currentLine);
-            } else {
-                ++gPosLine;
-                reportError(
-                    std::format("Unknown block type starting with '{}'", hdr),
-                    currentLine);
-            }
-        } else {
-            Stmt s = parse_stmt_one();
-            if (s.type == Stmt::YOSORO || s.type == Stmt::SET)
-                rest.push_back(std::move(s));
-        }
-    }
-    return rest;
-}
-
-// Codegen symbols and helpers
-struct Sym {
-    bool isArray = false;
-    AllocaInst* allocaInst = nullptr; // i64 or [N x i64]
-    int64_t L = 0, R = -1;            // for arrays
-    ArrayType* arrTy = nullptr;       // for arrays
 };
 
-struct CodeGenCtx {
-    LLVMContext Ctx;
-    unique_ptr<Module> Mod;
-    IRBuilder<> Builder;
-    IRBuilder<> AllocaBuilder;
-    Function* MainFn = nullptr;
-    BasicBlock* EntryBB = nullptr;
+// Code Generator
+class CodeGenerator {
+  private:
+    struct Sym {
+        bool isArray = false;
+        llvm::AllocaInst* allocaInst = nullptr;
+        int64_t L = 0, R = -1;
+        llvm::ArrayType* arrTy = nullptr;
+    };
 
-    // External functions
-    FunctionCallee Printf;
-    FunctionCallee Putchar;
+    llvm::LLVMContext Ctx;
+    std::unique_ptr<llvm::Module> Mod;
+    llvm::IRBuilder<> Builder;
+    llvm::IRBuilder<> AllocaBuilder;
+    llvm::Function* MainFn = nullptr;
 
-    // Symbol table
-    unordered_map<string, Sym> SymbolTable;
+    llvm::FunctionCallee Printf;
+    llvm::FunctionCallee Putchar;
 
-    // Types and constants
-    Type* I64;
-    Type* I32;
-    Type* I8;
-    Value* C0_64;
-    Value* C1_64;
-    Value* C10_32;
+    std::unordered_map<std::string, Sym> SymbolTable;
 
-    CodeGenCtx(const string& moduleName)
-        : Mod(make_unique<Module>(moduleName, Ctx)), Builder(Ctx),
+    llvm::Type* I64;
+    llvm::Type* I32;
+    llvm::Type* I8;
+    llvm::Value* C0_64;
+    llvm::Value* C1_64;
+    llvm::Value* C10_32;
+
+  public:
+    explicit CodeGenerator(const std::string& moduleName)
+        : Mod(std::make_unique<llvm::Module>(moduleName, Ctx)), Builder(Ctx),
           AllocaBuilder(Ctx) {
-        I64 = Type::getInt64Ty(Ctx);
-        I32 = Type::getInt32Ty(Ctx);
-        I8 = Type::getInt8Ty(Ctx);
-        C0_64 = ConstantInt::get(I64, 0);
-        C1_64 = ConstantInt::get(I64, 1);
-        C10_32 = ConstantInt::get(I32, 10); // '\n'
+        I64 = llvm::Type::getInt64Ty(Ctx);
+        I32 = llvm::Type::getInt32Ty(Ctx);
+        I8 = llvm::Type::getInt8Ty(Ctx);
+        C0_64 = llvm::ConstantInt::get(I64, 0);
+        C1_64 = llvm::ConstantInt::get(I64, 1);
+        C10_32 = llvm::ConstantInt::get(I32, 10); // '\n'
 
-        // main
-        FunctionType* FT = FunctionType::get(I32, false);
-        MainFn =
-            Function::Create(FT, Function::ExternalLinkage, "main", Mod.get());
-        EntryBB = BasicBlock::Create(Ctx, "entry", MainFn);
+        llvm::FunctionType* FT = llvm::FunctionType::get(I32, false);
+        MainFn = llvm::Function::Create(FT, llvm::Function::ExternalLinkage,
+                                        "main", Mod.get());
+        llvm::BasicBlock* EntryBB =
+            llvm::BasicBlock::Create(Ctx, "entry", MainFn);
         Builder.SetInsertPoint(EntryBB);
         AllocaBuilder.SetInsertPoint(EntryBB, EntryBB->begin());
 
-        // extern printf / putchar
         Printf = Mod->getOrInsertFunction(
-            "printf", FunctionType::get(I32, PointerType::getUnqual(I8), true));
-        Putchar = Mod->getOrInsertFunction("putchar",
-                                           FunctionType::get(I32, I32, false));
+            "printf", llvm::FunctionType::get(
+                          I32, llvm::PointerType::getUnqual(I8), true));
+        Putchar = Mod->getOrInsertFunction(
+            "putchar", llvm::FunctionType::get(I32, I32, false));
     }
 
-    Value* emitPrintI64(Value* v) {
-        auto* gv = Builder.CreateGlobalString("%lld ", "fmt");
-        Value* idx0 = ConstantInt::get(I64, 0);
-        Value* fmtPtr = Builder.CreateInBoundsGEP(
-            gv->getValueType(), gv, ArrayRef<Value*>{idx0, idx0}, "fmt.ptr");
-        return Builder.CreateCall(Printf, {fmtPtr, v});
-    }
+    void generate(const Program& prog) {
+        for (const auto& vd : prog.varDecls) {
+            declareVar(vd);
+        }
 
-    void emitNewline() { Builder.CreateCall(Putchar, {C10_32}); }
+        codegenBlock(prog.stmts);
 
-    void declareVar(const VarDecl& vd) {
-        if (!vd.isArray) {
-            AllocaInst* A = AllocaBuilder.CreateAlloca(I64, nullptr, vd.name);
-            Builder.CreateStore(C0_64, A); // Variables are initialized to 0
-            Sym s;
-            s.isArray = false;
-            s.allocaInst = A;
-            SymbolTable[vd.name] = s;
-        } else {
-            int64_t L = vd.L, R = vd.R;
-            int64_t N = (R >= L) ? (R - L + 1) : 0;
-            if (N <= 0)
-                N = 1; // avoid zero-sized alloca
-            ArrayType* AT = ArrayType::get(I64, (uint64_t)N);
-            AllocaInst* A = AllocaBuilder.CreateAlloca(AT, nullptr, vd.name);
-            Constant* ZeroArr = ConstantAggregateZero::get(AT);
-            Builder.CreateStore(ZeroArr, A);
+        emitNewline();
+        Builder.CreateRet(llvm::ConstantInt::get(I32, 0));
 
-            Sym s;
-            s.isArray = true;
-            s.allocaInst = A;
-            s.L = vd.L;
-            s.R = vd.R;
-            s.arrTy = AT;
-            SymbolTable[vd.name] = s;
+        if (llvm::verifyFunction(*MainFn, &llvm::errs())) {
+            llvm::errs() << "Function verification failed.\n";
+            std::exit(1);
+        }
+        if (llvm::verifyModule(*Mod, &llvm::errs())) {
+            llvm::errs() << "Module verification failed.\n";
+            std::exit(1);
         }
     }
 
-    Value* loadScalar(const string& name) {
-        auto it = SymbolTable.find(name);
-        assert(it != SymbolTable.end() && !it->second.isArray);
-        return Builder.CreateLoad(I64, it->second.allocaInst,
-                                  std::format("{}.val", name));
+    void writeToFile(const std::string& outputFile) {
+        std::error_code EC;
+        llvm::raw_fd_ostream dest(outputFile, EC, llvm::sys::fs::OF_None);
+        if (EC) {
+            llvm::errs() << std::format("Could not open file: {}\n",
+                                        EC.message());
+            std::exit(1);
+        }
+        Mod->print(dest, nullptr);
+        dest.flush();
     }
 
-    Value* getArrayElemPtr(const string& name, Value* idxVal) {
+  private:
+    void emitNewline() { Builder.CreateCall(Putchar, {C10_32}); }
+
+    llvm::Value* emitPrintI64(llvm::Value* v) {
+        auto* gv = Builder.CreateGlobalString("%lld ", "fmt");
+        llvm::Value* idx0 = llvm::ConstantInt::get(I64, 0);
+        llvm::Value* fmtPtr = Builder.CreateInBoundsGEP(
+            gv->getValueType(), gv, llvm::ArrayRef<llvm::Value*>{idx0, idx0},
+            "fmt.ptr");
+        return Builder.CreateCall(Printf, {fmtPtr, v});
+    }
+
+    void declareVar(const VarDecl& vd) {
+        if (!vd.isArray) {
+            llvm::AllocaInst* A =
+                AllocaBuilder.CreateAlloca(I64, nullptr, vd.name);
+            Builder.CreateStore(C0_64, A);
+            SymbolTable[vd.name] = {false, A, 0, -1, nullptr};
+        } else {
+            int64_t N = (vd.R >= vd.L) ? (vd.R - vd.L + 1) : 0;
+            if (N <= 0)
+                N = 1;
+            llvm::ArrayType* AT = llvm::ArrayType::get(I64, (uint64_t)N);
+            llvm::AllocaInst* A =
+                AllocaBuilder.CreateAlloca(AT, nullptr, vd.name);
+            Builder.CreateStore(llvm::ConstantAggregateZero::get(AT), A);
+            SymbolTable[vd.name] = {true, A, vd.L, vd.R, AT};
+        }
+    }
+
+    llvm::Value* loadScalar(const std::string& name) {
+        auto it = SymbolTable.find(name);
+        assert(it != SymbolTable.end() && !it->second.isArray);
+        return Builder.CreateLoad(I64, it->second.allocaInst, name + ".val");
+    }
+
+    llvm::Value* getArrayElemPtr(const std::string& name, llvm::Value* idxVal) {
         auto it = SymbolTable.find(name);
         assert(it != SymbolTable.end() && it->second.isArray);
         Sym& s = it->second;
-        Value* Lconst = ConstantInt::get(I64, s.L);
-        Value* rel =
-            Builder.CreateSub(idxVal, Lconst, std::format("{}.relidx", name));
-
-        Value* zero = C0_64;
-        Value* ptr0 = Builder.CreateInBoundsGEP(
-            s.arrTy, s.allocaInst, {zero, zero}, std::format("{}.ptr0", name));
-
-        Value* elemPtr = Builder.CreateInBoundsGEP(
-            I64, ptr0, rel, std::format("{}.elemptr", name));
-        return elemPtr;
+        llvm::Value* rel = Builder.CreateSub(
+            idxVal, llvm::ConstantInt::get(I64, s.L), name + ".relidx");
+        llvm::Value* ptr0 = Builder.CreateInBoundsGEP(
+            s.arrTy, s.allocaInst, {C0_64, C0_64}, name + ".ptr0");
+        return Builder.CreateInBoundsGEP(I64, ptr0, rel, name + ".elemptr");
     }
 
-    Value* loadArrayElem(const string& name, Value* idxVal) {
-        Value* elemPtr = getArrayElemPtr(name, idxVal);
-        return Builder.CreateLoad(I64, elemPtr, std::format("{}.elem", name));
+    llvm::Value* loadArrayElem(const std::string& name, llvm::Value* idxVal) {
+        return Builder.CreateLoad(I64, getArrayElemPtr(name, idxVal),
+                                  name + ".elem");
     }
 
-    void storeScalar(const string& name, Value* v) {
+    void storeScalar(const std::string& name, llvm::Value* v) {
         auto it = SymbolTable.find(name);
         assert(it != SymbolTable.end() && !it->second.isArray);
         Builder.CreateStore(v, it->second.allocaInst);
     }
 
-    void storeArrayElem(const string& name, Value* idxVal, Value* v) {
-        Value* elemPtr = getArrayElemPtr(name, idxVal);
-        Builder.CreateStore(v, elemPtr);
+    void storeArrayElem(const std::string& name, llvm::Value* idxVal,
+                        llvm::Value* v) {
+        Builder.CreateStore(v, getArrayElemPtr(name, idxVal));
     }
+
+    llvm::Value* buildExpr(const std::string& s, bool allowArray);
+    llvm::Value* buildExprCore(const std::string& t, bool allowArray);
+    llvm::Value* buildCond(CmpOp op, const std::string& a,
+                           const std::string& b);
+    void codegenBlock(const std::vector<Stmt>& blk);
+    void codegenStmt(const Stmt& s);
 };
 
-// Expression codegen
-Value* buildExprString(CodeGenCtx& CG, const string& s, bool allowArray);
+llvm::Value* CodeGenerator::buildExpr(const std::string& s, bool allowArray) {
+    return buildExprCore(StringUtils::remove_spaces(s), allowArray);
+}
 
-Value* buildExprCore(CodeGenCtx& CG, const string& t, bool allowArray) {
-    Type* I64 = CG.I64;
-    IRBuilder<>& B = CG.Builder;
-
-    size_t i = 0, n = t.size();
-    Value* res = nullptr;
+llvm::Value* CodeGenerator::buildExprCore(const std::string& t,
+                                          bool allowArray) {
+    std::size_t i = 0, n = t.size();
+    llvm::Value* res = nullptr;
     int32_t sign = +1;
 
-    auto applySignAndAcc = [&](Value* term) {
-        if (sign == -1) {
-            term = B.CreateSub(ConstantInt::get(I64, 0), term, "negtmp");
-        }
-        if (!res)
-            res = term;
-        else
-            res = B.CreateAdd(res, term, "addtmp");
+    auto applySignAndAcc = [&](llvm::Value* term) {
+        if (sign == -1)
+            term = Builder.CreateSub(C0_64, term, "negtmp");
+        res = res ? Builder.CreateAdd(res, term, "addtmp") : term;
         sign = +1;
     };
 
@@ -663,301 +624,227 @@ Value* buildExprCore(CodeGenCtx& CG, const string& t, bool allowArray) {
             ++i;
             continue;
         }
-
         if (i >= n)
             break;
 
-        if (isdigit(static_cast<unsigned char>(t[i]))) {
+        if (std::isdigit(static_cast<unsigned char>(t[i]))) {
             int64_t v = 0;
-            while (i < n && isdigit(static_cast<unsigned char>(t[i]))) {
-                v = v * 10 + (t[i] - '0');
-                ++i;
-            }
-            Value* term = ConstantInt::get(I64, v);
-            applySignAndAcc(term);
-        } else if (isalpha(static_cast<unsigned char>(t[i]))) {
-            string name;
-            while (i < n && isalpha(static_cast<unsigned char>(t[i]))) {
-                name.push_back(t[i]);
-                ++i;
-            }
+            while (i < n && std::isdigit(static_cast<unsigned char>(t[i])))
+                v = v * 10 + (t[i++] - '0');
+            applySignAndAcc(llvm::ConstantInt::get(I64, v));
+        } else if (std::isalpha(static_cast<unsigned char>(t[i]))) {
+            std::string name;
+            while (i < n && std::isalpha(static_cast<unsigned char>(t[i])))
+                name.push_back(t[i++]);
 
             if (i < n && t[i] == '[') {
                 if (!allowArray) {
-                    int32_t depth = 0;
+                    int d = 0;
                     do {
                         if (t[i] == '[')
-                            ++depth;
+                            d++;
                         else if (t[i] == ']')
-                            --depth;
-                        ++i;
-                    } while (i < n && depth > 0);
-                    applySignAndAcc(ConstantInt::get(I64, 0));
+                            d--;
+                        i++;
+                    } while (i < n && d > 0);
+                    applySignAndAcc(C0_64);
                 } else {
-                    size_t start = i + 1;
-                    int32_t depth = 1;
-                    size_t j = start;
-                    while (j < n && depth > 0) {
+                    std::size_t start = i + 1, j = start, d = 1;
+                    while (j < n && d > 0) {
                         if (t[j] == '[')
-                            ++depth;
+                            d++;
                         else if (t[j] == ']')
-                            --depth;
-                        ++j;
+                            d--;
+                        j++;
                     }
-                    size_t end = j - 1;
-                    string inside = t.substr(start, end - start);
-                    Value* idxVal = buildExprString(CG, inside, false);
+                    llvm::Value* idxVal =
+                        buildExpr(t.substr(start, j - 1 - start), false);
                     i = j;
-                    Value* term = CG.loadArrayElem(name, idxVal);
-                    applySignAndAcc(term);
+                    applySignAndAcc(loadArrayElem(name, idxVal));
                 }
             } else {
-                Value* term = CG.loadScalar(name);
-                applySignAndAcc(term);
+                applySignAndAcc(loadScalar(name));
             }
         } else {
             ++i;
         }
     }
-    if (!res)
-        res = ConstantInt::get(I64, 0);
-    return res;
+    return res ? res : C0_64;
 }
 
-Value* buildExprString(CodeGenCtx& CG, const string& s, bool allowArray) {
-    string t = remove_spaces(s);
-    return buildExprCore(CG, t, allowArray);
-}
-
-// Conditions
-Value* buildCond(CodeGenCtx& CG, CmpOp op, const string& a, const string& b) {
-    Value* va = buildExprString(CG, a, true);
-    Value* vb = buildExprString(CG, b, true);
+llvm::Value* CodeGenerator::buildCond(CmpOp op, const std::string& a,
+                                      const std::string& b) {
+    llvm::Value* va = buildExpr(a, true);
+    llvm::Value* vb = buildExpr(b, true);
     switch (op) {
-    case LT:
-        return CG.Builder.CreateICmpSLT(va, vb, "cmplt");
-    case GT:
-        return CG.Builder.CreateICmpSGT(va, vb, "cmpgt");
-    case LE:
-        return CG.Builder.CreateICmpSLE(va, vb, "cmple");
-    case GE:
-        return CG.Builder.CreateICmpSGE(va, vb, "cmpge");
-    case EQ:
-        return CG.Builder.CreateICmpEQ(va, vb, "cmpeq");
-    case NE:
-        return CG.Builder.CreateICmpNE(va, vb, "cmpne");
+    case CmpOp::LT:
+        return Builder.CreateICmpSLT(va, vb, "cmplt");
+    case CmpOp::GT:
+        return Builder.CreateICmpSGT(va, vb, "cmpgt");
+    case CmpOp::LE:
+        return Builder.CreateICmpSLE(va, vb, "cmple");
+    case CmpOp::GE:
+        return Builder.CreateICmpSGE(va, vb, "cmpge");
+    case CmpOp::EQ:
+        return Builder.CreateICmpEQ(va, vb, "cmpeq");
+    case CmpOp::NE:
+        return Builder.CreateICmpNE(va, vb, "cmpne");
     }
     return nullptr;
 }
 
-// Statement codegen
-void codegenBlock(CodeGenCtx& CG, const vector<Stmt>& blk);
-
-void codegenStmt(CodeGenCtx& CG, const Stmt& s) {
-    IRBuilder<>& B = CG.Builder;
-    LLVMContext& Ctx = CG.Ctx;
-
-    switch (s.type) {
-    case Stmt::YOSORO: { // print
-        Value* v = buildExprString(CG, s.expr, true);
-        CG.emitPrintI64(v);
-        break;
-    }
-    case Stmt::SET: { // assign
-        Value* rhs = buildExprString(CG, s.rhsExpr, true);
-        if (s.lhsIsArray) {
-            Value* idx = buildExprString(CG, s.lhsIndexExpr, false);
-            CG.storeArrayElem(s.lhsName, idx, rhs);
-        } else {
-            CG.storeScalar(s.lhsName, rhs);
-        }
-        break;
-    }
-    case Stmt::IHU: { // if
-        Function* F = CG.MainFn;
-        Value* cond = buildCond(CG, s.op, s.condA, s.condB);
-
-        BasicBlock* ThenBB = BasicBlock::Create(Ctx, "if.then", F);
-        BasicBlock* MergeBB = BasicBlock::Create(Ctx, "if.end", F);
-
-        B.CreateCondBr(cond, ThenBB, MergeBB);
-
-        B.SetInsertPoint(ThenBB);
-        codegenBlock(CG, s.body);
-        if (!ThenBB->getTerminator())
-            B.CreateBr(MergeBB);
-
-        B.SetInsertPoint(MergeBB);
-        break;
-    }
-    case Stmt::WHILE_: { // while
-        Function* F = CG.MainFn;
-        BasicBlock* CondBB = BasicBlock::Create(Ctx, "while.cond", F);
-        BasicBlock* BodyBB = BasicBlock::Create(Ctx, "while.body", F);
-        BasicBlock* AfterBB = BasicBlock::Create(Ctx, "while.end", F);
-
-        B.CreateBr(CondBB);
-
-        B.SetInsertPoint(CondBB);
-        {
-            Value* c = buildCond(CG, s.op, s.condA, s.condB);
-            B.CreateCondBr(c, BodyBB, AfterBB);
-        }
-
-        B.SetInsertPoint(BodyBB);
-        codegenBlock(CG, s.body);
-        if (!BodyBB->getTerminator())
-            B.CreateBr(CondBB);
-
-        B.SetInsertPoint(AfterBB);
-        break;
-    }
-    case Stmt::HOR: { // for
-        Function* F = CG.MainFn;
-        Value* startVal = buildExprString(CG, s.forStart, true);
-        Value* endVal = buildExprString(CG, s.forEnd, true);
-
-        if (s.forVarIsArray) {
-            Value* idx = buildExprString(CG, s.forVarIndexExpr, false);
-            CG.storeArrayElem(s.forVarName, idx, startVal);
-        } else {
-            CG.storeScalar(s.forVarName, startVal);
-        }
-
-        BasicBlock* CondBB = BasicBlock::Create(Ctx, "for.cond", F);
-        BasicBlock* BodyBB = BasicBlock::Create(Ctx, "for.body", F);
-        BasicBlock* StepBB = BasicBlock::Create(Ctx, "for.inc", F);
-        BasicBlock* AfterBB = BasicBlock::Create(Ctx, "for.end", F);
-
-        B.CreateBr(CondBB);
-
-        B.SetInsertPoint(CondBB);
-        {
-            Value* iVal;
-            if (s.forVarIsArray) {
-                Value* idx = buildExprString(CG, s.forVarIndexExpr, false);
-                iVal = CG.loadArrayElem(s.forVarName, idx);
-            } else {
-                iVal = CG.loadScalar(s.forVarName);
-            }
-            Value* c = B.CreateICmpSLE(iVal, endVal, "forcond");
-            B.CreateCondBr(c, BodyBB, AfterBB);
-        }
-
-        B.SetInsertPoint(BodyBB);
-        codegenBlock(CG, s.body);
-        if (!BodyBB->getTerminator())
-            B.CreateBr(StepBB);
-
-        B.SetInsertPoint(StepBB);
-        {
-            Value* iVal;
-            if (s.forVarIsArray) {
-                Value* idx = buildExprString(CG, s.forVarIndexExpr, false);
-                iVal = CG.loadArrayElem(s.forVarName, idx);
-            } else {
-                iVal = CG.loadScalar(s.forVarName);
-            }
-            Value* nxt = B.CreateAdd(iVal, CG.C1_64, "inc"); // increment
-            if (s.forVarIsArray) {
-                Value* idx = buildExprString(CG, s.forVarIndexExpr, false);
-                CG.storeArrayElem(s.forVarName, idx, nxt);
-            } else {
-                CG.storeScalar(s.forVarName, nxt);
-            }
-            B.CreateBr(CondBB);
-        }
-
-        B.SetInsertPoint(AfterBB);
-
-        // If the loop was supposed to run, set the variable to its end value.
-        Value* loopDidRunCond = B.CreateICmpSLE(startVal, endVal, "loopDidRun");
-        BasicBlock* SetFinalVarBB = BasicBlock::Create(Ctx, "for.setfinal", F);
-        BasicBlock* FinalMergeBB = BasicBlock::Create(Ctx, "for.finalmerge", F);
-        B.CreateCondBr(loopDidRunCond, SetFinalVarBB, FinalMergeBB);
-
-        B.SetInsertPoint(SetFinalVarBB);
-        if (s.forVarIsArray) {
-            Value* idx = buildExprString(CG, s.forVarIndexExpr, false);
-            CG.storeArrayElem(s.forVarName, idx, endVal);
-        } else {
-            CG.storeScalar(s.forVarName, endVal);
-        }
-        B.CreateBr(FinalMergeBB);
-
-        B.SetInsertPoint(FinalMergeBB);
-        break;
-    }
-    }
-}
-
-void codegenBlock(CodeGenCtx& CG, const vector<Stmt>& blk) {
+void CodeGenerator::codegenBlock(const std::vector<Stmt>& blk) {
     for (const auto& st : blk) {
-        codegenStmt(CG, st);
+        codegenStmt(st);
     }
 }
 
-// Main
-int main(int argc, char** argv) {
-    if (argc != 3) {
-        errs() << std::format("Usage: {} <input.cyaron> <output.ll>\n",
-                              argv[0]);
-        return 1;
+void CodeGenerator::codegenStmt(const Stmt& s) {
+    switch (s.type) {
+    case Stmt::Type::YOSORO:
+        emitPrintI64(buildExpr(s.expr, true));
+        break;
+    case Stmt::Type::SET: {
+        llvm::Value* rhs = buildExpr(s.rhsExpr, true);
+        if (s.lhsIsArray) {
+            llvm::Value* idx = buildExpr(s.lhsIndexExpr, false);
+            storeArrayElem(s.lhsName, idx, rhs);
+        } else {
+            storeScalar(s.lhsName, rhs);
+        }
+        break;
     }
-    string inputFile = argv[1];
-    string outputFile = argv[2];
+    case Stmt::Type::IHU: {
+        llvm::Value* cond = buildCond(s.op, s.condA, s.condB);
+        llvm::BasicBlock* ThenBB =
+            llvm::BasicBlock::Create(Ctx, "if.then", MainFn);
+        llvm::BasicBlock* MergeBB =
+            llvm::BasicBlock::Create(Ctx, "if.end", MainFn);
+        Builder.CreateCondBr(cond, ThenBB, MergeBB);
+        Builder.SetInsertPoint(ThenBB);
+        codegenBlock(s.body);
+        if (!ThenBB->getTerminator())
+            Builder.CreateBr(MergeBB);
+        Builder.SetInsertPoint(MergeBB);
+        break;
+    }
+    case Stmt::Type::WHILE_: {
+        llvm::BasicBlock* CondBB =
+            llvm::BasicBlock::Create(Ctx, "while.cond", MainFn);
+        llvm::BasicBlock* BodyBB =
+            llvm::BasicBlock::Create(Ctx, "while.body", MainFn);
+        llvm::BasicBlock* AfterBB =
+            llvm::BasicBlock::Create(Ctx, "while.end", MainFn);
+        Builder.CreateBr(CondBB);
+        Builder.SetInsertPoint(CondBB);
+        Builder.CreateCondBr(buildCond(s.op, s.condA, s.condB), BodyBB,
+                             AfterBB);
+        Builder.SetInsertPoint(BodyBB);
+        codegenBlock(s.body);
+        if (!BodyBB->getTerminator())
+            Builder.CreateBr(CondBB);
+        Builder.SetInsertPoint(AfterBB);
+        break;
+    }
+    case Stmt::Type::HOR: {
+        llvm::Value* startVal = buildExpr(s.forStart, true);
+        llvm::Value* endVal = buildExpr(s.forEnd, true);
 
-    ifstream ifs(inputFile);
+        auto storeLoopVar = [&](llvm::Value* v) {
+            if (s.forVarIsArray)
+                storeArrayElem(s.forVarName,
+                               buildExpr(s.forVarIndexExpr, false), v);
+            else
+                storeScalar(s.forVarName, v);
+        };
+        auto loadLoopVar = [&]() {
+            if (s.forVarIsArray)
+                return loadArrayElem(s.forVarName,
+                                     buildExpr(s.forVarIndexExpr, false));
+            return loadScalar(s.forVarName);
+        };
+
+        storeLoopVar(startVal);
+
+        llvm::BasicBlock* CondBB =
+            llvm::BasicBlock::Create(Ctx, "for.cond", MainFn);
+        llvm::BasicBlock* BodyBB =
+            llvm::BasicBlock::Create(Ctx, "for.body", MainFn);
+        llvm::BasicBlock* StepBB =
+            llvm::BasicBlock::Create(Ctx, "for.inc", MainFn);
+        llvm::BasicBlock* AfterBB =
+            llvm::BasicBlock::Create(Ctx, "for.end", MainFn);
+
+        Builder.CreateBr(CondBB);
+        Builder.SetInsertPoint(CondBB);
+        Builder.CreateCondBr(
+            Builder.CreateICmpSLE(loadLoopVar(), endVal, "forcond"), BodyBB,
+            AfterBB);
+
+        Builder.SetInsertPoint(BodyBB);
+        codegenBlock(s.body);
+        if (!BodyBB->getTerminator())
+            Builder.CreateBr(StepBB);
+
+        Builder.SetInsertPoint(StepBB);
+        storeLoopVar(Builder.CreateAdd(loadLoopVar(), C1_64, "inc"));
+        Builder.CreateBr(CondBB);
+
+        Builder.SetInsertPoint(AfterBB);
+        llvm::BasicBlock* SetFinalVarBB =
+            llvm::BasicBlock::Create(Ctx, "for.setfinal", MainFn);
+        llvm::BasicBlock* FinalMergeBB =
+            llvm::BasicBlock::Create(Ctx, "for.finalmerge", MainFn);
+        Builder.CreateCondBr(
+            Builder.CreateICmpSLE(startVal, endVal, "loopDidRun"),
+            SetFinalVarBB, FinalMergeBB);
+
+        Builder.SetInsertPoint(SetFinalVarBB);
+        storeLoopVar(endVal);
+        Builder.CreateBr(FinalMergeBB);
+
+        Builder.SetInsertPoint(FinalMergeBB);
+        break;
+    }
+    }
+}
+
+std::vector<std::string> read_lines_from_file(const std::string& filename) {
+    std::ifstream ifs(filename);
     if (!ifs) {
-        errs() << std::format("Error: cannot open input file {}\n", inputFile);
-        return 1;
+        llvm::errs() << std::format("Error: cannot open input file {}\n",
+                                    filename);
+        std::exit(1);
     }
-
-    string line;
-    while (getline(ifs, line)) {
-        size_t comment_pos = line.find('#');
-        if (comment_pos != string::npos) {
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        std::size_t comment_pos = line.find('#');
+        if (comment_pos != std::string::npos) {
             line = line.substr(0, comment_pos);
         }
-        gLines.push_back(line);
+        lines.push_back(line);
     }
+    return lines;
+}
 
-    gPosLine = 0;
-    size_t tmpPos = 0;
-    vector<VarDecl> decls = parse_vars_block(gLines, tmpPos);
-    gPosLine = tmpPos;
-
-    vector<Stmt> program = parse_program_rest();
-
-    CodeGenCtx CG("CYaRonModule");
-
-    for (const auto& vd : decls) {
-        CG.declareVar(vd);
-    }
-
-    codegenBlock(CG, program);
-
-    CG.emitNewline();
-    CG.Builder.CreateRet(ConstantInt::get(CG.I32, 0));
-
-    if (verifyFunction(*CG.MainFn, &errs())) {
-        errs() << "Function verification failed.\n";
+int main(int argc, char** argv) {
+    if (argc != 3) {
+        llvm::errs() << std::format("Usage: {} <input.cyaron> <output.ll>\n",
+                                    argv[0]);
         return 1;
     }
-    if (verifyModule(*CG.Mod, &errs())) {
-        errs() << "Module verification failed.\n";
-        return 1;
-    }
+    std::string inputFile = argv[1];
+    std::string outputFile = argv[2];
 
-    std::error_code EC;
-    raw_fd_ostream dest(outputFile, EC, sys::fs::OF_None);
+    auto lines = read_lines_from_file(inputFile);
 
-    if (EC) {
-        errs() << std::format("Could not open file: {}", EC.message());
-        return 1;
-    }
+    Parser parser(std::move(lines));
+    Program program = parser.parse_program();
 
-    CG.Mod->print(dest, nullptr);
-    dest.flush();
+    CodeGenerator generator("CYaRonModule");
+    generator.generate(program);
+    generator.writeToFile(outputFile);
+
     return 0;
 }

@@ -1,4 +1,4 @@
-# Empty number in array range
+# Invalid array range.
 { vars
     b: array[int, 1..]
 }
