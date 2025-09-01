@@ -10,6 +10,8 @@
         "cmpne",
         "cyaron",
         "cyaronc",
+        "faddtmp",
+        "fnegtmp",
         "Lconst",
         "libnames",
         "lstr",

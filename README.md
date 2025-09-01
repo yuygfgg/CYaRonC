@@ -92,3 +92,16 @@ python3 test/run_tests.py
 
 # CYaRon语的最后一行，一定是一个换行。
 ```
+
+Extensions:
+```
+{ vars
+  a:float
+  arr:array[float, 0..1]
+  num_float:int
+}
+:input a
+:input arr[0]
+:set num_float, arr[0] + a
+:yosoro num_float
+```

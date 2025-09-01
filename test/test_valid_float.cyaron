@@ -1,0 +1,17 @@
+# 3.670000 3 4
+{ vars
+  a:float
+  b:float
+  arr:array[float, 0..1]
+  integer_num:int
+}
+
+:set a, 1.56
+:set b, 1.11
+:set arr[0], a + b + 1
+:yosoro arr[0]
+:set integer_num, arr[0]
+:yosoro integer_num
+:set arr[1], arr[0] + 0.5
+:set integer_num, arr[1]
+:yosoro integer_num

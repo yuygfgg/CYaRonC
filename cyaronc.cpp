@@ -32,21 +32,20 @@ static constexpr std::string_view WHILE_PREFIX = "while";
 static constexpr std::string_view VARS_PREFIX = "vars";
 static constexpr std::string_view SET_PREFIX = ":set";
 static constexpr std::string_view YOSORO_PREFIX = ":yosoro";
-static constexpr std::string_view ARRAY_PREFIX = "array[int,";
-static constexpr std::string_view ARRAY_SUFFIX = "]";
-
+static constexpr std::string_view INPUT_PREFIX = ":input";
 // AST Node Definitions
 enum class CmpOp { LT, GT, LE, GE, EQ, NE };
+enum class VarType { INT, FLOAT };
 
 struct Stmt {
-    enum class Type { YOSORO, SET, IHU, HOR, WHILE_ };
+    enum class Type { YOSORO, SET, IHU, HOR, WHILE_, INPUT };
     Type type;
     std::size_t line_number;
 
     // YOSORO (print)
     std::string expr;
 
-    // SET (assignment)
+    // SET (assignment) / INPUT
     std::string lhsName;
     bool lhsIsArray = false;
     std::string lhsIndexExpr;
@@ -66,6 +65,7 @@ struct Stmt {
 
 struct VarDecl {
     std::string name;
+    VarType type = VarType::INT;
     bool isArray = false;
     int64_t L = 0, R = -1;
 };
@@ -105,6 +105,21 @@ static inline std::string remove_spaces(const std::string& s) {
         if (!std::isspace(static_cast<unsigned char>(c)))
             t.push_back(c);
     return t;
+}
+
+static inline bool is_valid_identifier(const std::string& s) {
+    if (s.empty()) {
+        return false;
+    }
+    if (!std::isalpha(static_cast<unsigned char>(s[0])) && s[0] != '_') {
+        return false;
+    }
+    for (size_t i = 1; i < s.size(); ++i) {
+        if (!std::isalnum(static_cast<unsigned char>(s[i])) && s[i] != '_') {
+            return false;
+        }
+    }
+    return true;
 }
 
 static inline std::vector<std::string>
@@ -286,6 +301,16 @@ class Parser {
         } else if (StringUtils::starts_with(t, YOSORO_PREFIX)) {
             s.type = Stmt::Type::YOSORO;
             s.expr = StringUtils::trim(t.substr(YOSORO_PREFIX.size()));
+        } else if (StringUtils::starts_with(t, INPUT_PREFIX)) {
+            std::string rest = StringUtils::trim(t.substr(INPUT_PREFIX.size()));
+            if (rest.empty())
+                reportError("Missing variable for ':input' statement.",
+                            line_num);
+            s.type = Stmt::Type::INPUT;
+            VarRef lhs = parse_var_ref(rest);
+            s.lhsName = lhs.name;
+            s.lhsIsArray = lhs.isArray;
+            s.lhsIndexExpr = lhs.indexExpr;
         } else {
             reportError(std::format("Unknown statement: {}\n", t), line_num);
         }
@@ -294,7 +319,8 @@ class Parser {
 
     Stmt parse_block_stmt() {
         std::size_t line_num = current_line_num();
-        std::string t = StringUtils::trim(StringUtils::rtrim_cr(current_line()));
+        std::string t =
+            StringUtils::trim(StringUtils::rtrim_cr(current_line()));
         std::string hdr = StringUtils::trim(t.substr(1));
         advance(); // Consume opening brace line
 
@@ -401,39 +427,66 @@ class Parser {
 
             VarDecl vd;
             vd.name = StringUtils::trim(s.substr(0, colon));
+            if (!StringUtils::is_valid_identifier(vd.name)) {
+                reportError(std::format("Invalid identifier '{}'", vd.name),
+                            var_line_num);
+            }
             std::string kind = StringUtils::trim(s.substr(colon + 1));
 
             if (kind == "int") {
                 vd.isArray = false;
-            } else {
-                if (StringUtils::starts_with(kind, ARRAY_PREFIX) &&
-                    kind.back() == ARRAY_SUFFIX[0]) {
-                    std::string inside =
-                        kind.substr(ARRAY_PREFIX.size(),
-                                    kind.size() - ARRAY_PREFIX.size() - 1);
-                    std::size_t dots = inside.find("..");
-                    if (dots == std::string::npos)
-                        reportError("Invalid array range. Expected 'L..R'.",
-                                    var_line_num);
+                vd.type = VarType::INT;
+            } else if (kind == "float") {
+                vd.isArray = false;
+                vd.type = VarType::FLOAT;
+            } else if (StringUtils::starts_with(kind, "array[") &&
+                       kind.back() == ']') {
+                std::string inside =
+                    kind.substr(sizeof("array[") - 1,
+                                kind.size() - (sizeof("array[") - 1) - 1);
 
-                    vd.isArray = true;
-                    std::string lstr =
-                        StringUtils::trim(inside.substr(0, dots));
-                    std::string rstr =
-                        StringUtils::trim(inside.substr(dots + 2));
+                auto comma_pos = inside.find(',');
+                if (comma_pos == std::string::npos)
+                    reportError("Invalid array declaration. Expected "
+                                "'array[type,L..R]'.",
+                                var_line_num);
 
-                    if (lstr.empty() || rstr.empty())
-                        reportError("Invalid array range. Expected 'L..R'.",
-                                    var_line_num);
-
-                    vd.L = parse_int_literal(lstr);
-                    vd.R = parse_int_literal(rstr);
+                std::string type_str =
+                    StringUtils::trim(inside.substr(0, comma_pos));
+                if (type_str == "int") {
+                    vd.type = VarType::INT;
+                } else if (type_str == "float") {
+                    vd.type = VarType::FLOAT;
                 } else {
-                    reportError(std::format("Invalid type '{}'. Expected 'int' "
-                                            "or 'array[int,L..R]'.\n",
-                                            kind),
+                    reportError(std::format("Invalid array element type '{}'.",
+                                            type_str),
                                 var_line_num);
                 }
+
+                std::string range_str =
+                    StringUtils::trim(inside.substr(comma_pos + 1));
+                std::size_t dots = range_str.find("..");
+                if (dots == std::string::npos)
+                    reportError("Invalid array range. Expected 'L..R'.",
+                                var_line_num);
+
+                vd.isArray = true;
+                std::string lstr = StringUtils::trim(range_str.substr(0, dots));
+                std::string rstr =
+                    StringUtils::trim(range_str.substr(dots + 2));
+
+                if (lstr.empty() || rstr.empty())
+                    reportError("Invalid array range. Expected 'L..R'.",
+                                var_line_num);
+
+                vd.L = parse_int_literal(lstr);
+                vd.R = parse_int_literal(rstr);
+            } else {
+                reportError(
+                    std::format("Invalid type '{}'. Expected 'int', 'float', "
+                                "or 'array[type,L..R]'.\n",
+                                kind),
+                    var_line_num);
             }
             decls.push_back(std::move(vd));
         }
@@ -444,7 +497,13 @@ class Parser {
 // Code Generator
 class CodeGenerator {
   private:
+    struct TypedValue {
+        llvm::Value* val = nullptr;
+        VarType type = VarType::INT;
+    };
+
     struct Sym {
+        VarType type;
         bool isArray = false;
         llvm::AllocaInst* allocaInst = nullptr;
         int64_t L = 0, R = -1;
@@ -459,9 +518,11 @@ class CodeGenerator {
 
     llvm::FunctionCallee Printf;
     llvm::FunctionCallee Putchar;
+    llvm::FunctionCallee Scanf;
 
     std::unordered_map<std::string, Sym> SymbolTable;
 
+    llvm::Type* F64;
     llvm::Type* I64;
     llvm::Type* I32;
     llvm::Type* I8;
@@ -473,6 +534,7 @@ class CodeGenerator {
     explicit CodeGenerator(const std::string& moduleName)
         : Mod(std::make_unique<llvm::Module>(moduleName, Ctx)), Builder(Ctx),
           AllocaBuilder(Ctx) {
+        F64 = llvm::Type::getDoubleTy(Ctx);
         I64 = llvm::Type::getInt64Ty(Ctx);
         I32 = llvm::Type::getInt32Ty(Ctx);
         I8 = llvm::Type::getInt8Ty(Ctx);
@@ -493,6 +555,9 @@ class CodeGenerator {
             llvm::FunctionType::get(I32, llvm::PointerType::get(Ctx, 0), true));
         Putchar = Mod->getOrInsertFunction(
             "putchar", llvm::FunctionType::get(I32, I32, false));
+        Scanf = Mod->getOrInsertFunction(
+            "scanf",
+            llvm::FunctionType::get(I32, llvm::PointerType::get(Ctx, 0), true));
     }
 
     void generate(const Program& prog) {
@@ -519,7 +584,7 @@ class CodeGenerator {
         std::error_code EC;
         llvm::raw_fd_ostream dest(outputFile, EC, llvm::sys::fs::OF_None);
         if (EC) {
-            llvm::errs() << std::format("Could not open file: {}\n",
+            llvm::errs() << std::format("Could not open file: {}\\n",
                                         EC.message());
             std::exit(1);
         }
@@ -530,37 +595,27 @@ class CodeGenerator {
   private:
     void emitNewline() { Builder.CreateCall(Putchar, {C10_32}); }
 
-    llvm::Value* emitPrintI64(llvm::Value* v) {
-        auto* gv = Builder.CreateGlobalString("%lld ", "fmt");
-        llvm::Value* idx0 = llvm::ConstantInt::get(I64, 0);
-        llvm::Value* fmtPtr = Builder.CreateInBoundsGEP(
-            gv->getValueType(), gv, llvm::ArrayRef<llvm::Value*>{idx0, idx0},
-            "fmt.ptr");
-        return Builder.CreateCall(Printf, {fmtPtr, v});
-    }
-
     void declareVar(const VarDecl& vd) {
+        llvm::Type* llvmType = (vd.type == VarType::FLOAT) ? F64 : I64;
         if (!vd.isArray) {
             llvm::AllocaInst* A =
-                AllocaBuilder.CreateAlloca(I64, nullptr, vd.name);
-            Builder.CreateStore(C0_64, A);
-            SymbolTable[vd.name] = {false, A, 0, -1, nullptr};
+                AllocaBuilder.CreateAlloca(llvmType, nullptr, vd.name);
+            if (vd.type == VarType::INT) {
+                Builder.CreateStore(C0_64, A);
+            } else {
+                Builder.CreateStore(llvm::ConstantFP::get(F64, 0.0), A);
+            }
+            SymbolTable[vd.name] = {vd.type, false, A, 0, -1, nullptr};
         } else {
             int64_t N = (vd.R >= vd.L) ? (vd.R - vd.L + 1) : 0;
             if (N <= 0)
                 N = 1;
-            llvm::ArrayType* AT = llvm::ArrayType::get(I64, (uint64_t)N);
+            llvm::ArrayType* AT = llvm::ArrayType::get(llvmType, (uint64_t)N);
             llvm::AllocaInst* A =
                 AllocaBuilder.CreateAlloca(AT, nullptr, vd.name);
             Builder.CreateStore(llvm::ConstantAggregateZero::get(AT), A);
-            SymbolTable[vd.name] = {true, A, vd.L, vd.R, AT};
+            SymbolTable[vd.name] = {vd.type, true, A, vd.L, vd.R, AT};
         }
-    }
-
-    llvm::Value* loadScalar(const std::string& name) {
-        auto it = SymbolTable.find(name);
-        assert(it != SymbolTable.end() && !it->second.isArray);
-        return Builder.CreateLoad(I64, it->second.allocaInst, name + ".val");
     }
 
     llvm::Value* getArrayElemPtr(const std::string& name, llvm::Value* idxVal) {
@@ -569,14 +624,11 @@ class CodeGenerator {
         Sym& s = it->second;
         llvm::Value* rel = Builder.CreateSub(
             idxVal, llvm::ConstantInt::get(I64, s.L), name + ".relidx");
+        llvm::Type* elemType = (s.type == VarType::FLOAT) ? F64 : I64;
         llvm::Value* ptr0 = Builder.CreateInBoundsGEP(
             s.arrTy, s.allocaInst, {C0_64, C0_64}, name + ".ptr0");
-        return Builder.CreateInBoundsGEP(I64, ptr0, rel, name + ".elemptr");
-    }
-
-    llvm::Value* loadArrayElem(const std::string& name, llvm::Value* idxVal) {
-        return Builder.CreateLoad(I64, getArrayElemPtr(name, idxVal),
-                                  name + ".elem");
+        return Builder.CreateInBoundsGEP(elemType, ptr0, rel,
+                                         name + ".elemptr");
     }
 
     void storeScalar(const std::string& name, llvm::Value* v) {
@@ -590,32 +642,63 @@ class CodeGenerator {
         Builder.CreateStore(v, getArrayElemPtr(name, idxVal));
     }
 
-    llvm::Value* buildExpr(const std::string& s, bool allowArray,
-                           std::size_t line_number);
-    llvm::Value* buildExprCore(const std::string& t, bool allowArray,
-                               std::size_t line_number);
+    TypedValue buildExpr(const std::string& s, bool allowArray,
+                         std::size_t line_number);
+    TypedValue buildExprCore(const std::string& t, bool allowArray,
+                             std::size_t line_number);
     llvm::Value* buildCond(CmpOp op, const std::string& a, const std::string& b,
                            std::size_t line_number);
     void codegenBlock(const std::vector<Stmt>& blk);
     void codegenStmt(const Stmt& s);
 };
 
-llvm::Value* CodeGenerator::buildExpr(const std::string& s, bool allowArray,
-                                      std::size_t line_number) {
+CodeGenerator::TypedValue CodeGenerator::buildExpr(const std::string& s,
+                                                   bool allowArray,
+                                                   std::size_t line_number) {
     return buildExprCore(StringUtils::remove_spaces(s), allowArray,
                          line_number);
 }
 
-llvm::Value* CodeGenerator::buildExprCore(const std::string& t, bool allowArray,
-                                          std::size_t line_number) {
+CodeGenerator::TypedValue
+CodeGenerator::buildExprCore(const std::string& t, bool allowArray,
+                             std::size_t line_number) {
     std::size_t i = 0, n = t.size();
-    llvm::Value* res = nullptr;
+    TypedValue res;
     int32_t sign = +1;
 
-    auto applySignAndAcc = [&](llvm::Value* term) {
-        if (sign == -1)
-            term = Builder.CreateSub(C0_64, term, "negtmp");
-        res = res ? Builder.CreateAdd(res, term, "addtmp") : term;
+    auto applySignAndAcc = [&](TypedValue term) {
+        if (sign == -1) {
+            if (term.type == VarType::INT) {
+                term.val = Builder.CreateSub(C0_64, term.val, "negtmp");
+            } else {
+                term.val = Builder.CreateFSub(llvm::ConstantFP::get(F64, 0.0),
+                                              term.val, "fnegtmp");
+            }
+        }
+
+        if (!res.val) {
+            res = term;
+        } else {
+            TypedValue lhs = res;
+            TypedValue rhs = term;
+            if (lhs.type == VarType::FLOAT && rhs.type == VarType::INT) {
+                rhs.val = Builder.CreateSIToFP(rhs.val, F64, "cast");
+                rhs.type = VarType::FLOAT;
+            } else if (lhs.type == VarType::INT && rhs.type == VarType::FLOAT) {
+                lhs.val = Builder.CreateSIToFP(lhs.val, F64, "cast");
+                lhs.type = VarType::FLOAT;
+            }
+
+            if (lhs.type == VarType::INT) { // both are ints
+                assert(rhs.type == VarType::INT);
+                res.val = Builder.CreateAdd(lhs.val, rhs.val, "addtmp");
+                res.type = VarType::INT;
+            } else { // both are floats
+                assert(rhs.type == VarType::FLOAT);
+                res.val = Builder.CreateFAdd(lhs.val, rhs.val, "faddtmp");
+                res.type = VarType::FLOAT;
+            }
+        }
         sign = +1;
     };
 
@@ -634,42 +717,72 @@ llvm::Value* CodeGenerator::buildExprCore(const std::string& t, bool allowArray,
             break;
 
         if (std::isdigit(static_cast<unsigned char>(t[i]))) {
-            int64_t v = 0;
+            std::size_t start_i = i;
+            bool is_float = false;
             while (i < n && std::isdigit(static_cast<unsigned char>(t[i])))
-                v = v * 10 + (t[i++] - '0');
-            applySignAndAcc(llvm::ConstantInt::get(I64, v));
-        } else if (std::isalpha(static_cast<unsigned char>(t[i]))) {
+                i++;
+            if (i < n && t[i] == '.') {
+                is_float = true;
+                i++;
+                while (i < n && std::isdigit(static_cast<unsigned char>(t[i])))
+                    i++;
+            }
+            std::string num_str = t.substr(start_i, i - start_i);
+            if (is_float) {
+                double v = std::stod(num_str);
+                applySignAndAcc(
+                    {llvm::ConstantFP::get(F64, v), VarType::FLOAT});
+            } else {
+                int64_t v = std::stoll(num_str);
+                applySignAndAcc({llvm::ConstantInt::get(I64, v), VarType::INT});
+            }
+        } else if (std::isalpha(static_cast<unsigned char>(t[i])) ||
+                   t[i] == '_') {
             std::string name;
-            while (i < n && std::isalpha(static_cast<unsigned char>(t[i])))
+            name.push_back(t[i++]);
+            while (i < n && (std::isalnum(static_cast<unsigned char>(t[i])) ||
+                             t[i] == '_'))
                 name.push_back(t[i++]);
+
+            auto it = SymbolTable.find(name);
+            if (it == SymbolTable.end()) {
+                reportError(std::format("Unknown variable '{}'", name),
+                            line_number);
+            }
 
             if (i < n && t[i] == '[') {
                 if (!allowArray) {
-                    int d = 0;
-                    do {
-                        if (t[i] == '[')
-                            d++;
-                        else if (t[i] == ']')
-                            d--;
-                        i++;
-                    } while (i < n && d > 0);
-                    applySignAndAcc(C0_64);
-                } else {
-                    std::size_t start = i + 1, j = start, d = 1;
-                    while (j < n && d > 0) {
-                        if (t[j] == '[')
-                            d++;
-                        else if (t[j] == ']')
-                            d--;
-                        j++;
-                    }
-                    llvm::Value* idxVal = buildExpr(
-                        t.substr(start, j - 1 - start), false, line_number);
-                    i = j;
-                    applySignAndAcc(loadArrayElem(name, idxVal));
+                    reportError("Unexpected array access in this expression.",
+                                line_number);
                 }
+                std::size_t start = i + 1, j = start, d = 1;
+                while (j < n && d > 0) {
+                    if (t[j] == '[')
+                        d++;
+                    else if (t[j] == ']')
+                        d--;
+                    j++;
+                }
+                TypedValue idx_tv = buildExpr(t.substr(start, j - 1 - start),
+                                              false, line_number);
+                if (idx_tv.type == VarType::FLOAT) {
+                    reportError("Array index cannot be a float.", line_number);
+                }
+                i = j;
+
+                llvm::Value* ptr = getArrayElemPtr(name, idx_tv.val);
+                llvm::Type* elemType =
+                    (it->second.type == VarType::FLOAT) ? F64 : I64;
+                applySignAndAcc(
+                    {Builder.CreateLoad(elemType, ptr, name + ".elem"),
+                     it->second.type});
             } else {
-                applySignAndAcc(loadScalar(name));
+                llvm::Type* elemType =
+                    (it->second.type == VarType::FLOAT) ? F64 : I64;
+                applySignAndAcc(
+                    {Builder.CreateLoad(elemType, it->second.allocaInst,
+                                        name + ".val"),
+                     it->second.type});
             }
         } else {
             reportError(std::format("Unknown token '{}' in expression",
@@ -677,27 +790,66 @@ llvm::Value* CodeGenerator::buildExprCore(const std::string& t, bool allowArray,
                         line_number);
         }
     }
-    return res ? res : C0_64;
+    if (!res.val) {
+        return {C0_64, VarType::INT};
+    }
+    return res;
 }
 
 llvm::Value* CodeGenerator::buildCond(CmpOp op, const std::string& a,
                                       const std::string& b,
                                       std::size_t line_number) {
-    llvm::Value* va = buildExpr(a, true, line_number);
-    llvm::Value* vb = buildExpr(b, true, line_number);
-    switch (op) {
-    case CmpOp::LT:
-        return Builder.CreateICmpSLT(va, vb, "cmplt");
-    case CmpOp::GT:
-        return Builder.CreateICmpSGT(va, vb, "cmpgt");
-    case CmpOp::LE:
-        return Builder.CreateICmpSLE(va, vb, "cmple");
-    case CmpOp::GE:
-        return Builder.CreateICmpSGE(va, vb, "cmpge");
-    case CmpOp::EQ:
-        return Builder.CreateICmpEQ(va, vb, "cmpeq");
-    case CmpOp::NE:
-        return Builder.CreateICmpNE(va, vb, "cmpne");
+    TypedValue va_tv = buildExpr(a, true, line_number);
+    TypedValue vb_tv = buildExpr(b, true, line_number);
+
+    if (va_tv.type == VarType::FLOAT && vb_tv.type == VarType::INT) {
+        vb_tv.val = Builder.CreateSIToFP(vb_tv.val, F64, "cast.cond");
+        vb_tv.type = VarType::FLOAT;
+    } else if (va_tv.type == VarType::INT && vb_tv.type == VarType::FLOAT) {
+        va_tv.val = Builder.CreateSIToFP(va_tv.val, F64, "cast.cond");
+        va_tv.type = VarType::FLOAT;
+    }
+
+    if (va_tv.type == VarType::INT) {
+        assert(vb_tv.type == VarType::INT);
+        switch (op) {
+        case CmpOp::LT:
+            return Builder.CreateICmpSLT(va_tv.val, vb_tv.val, "cmplt");
+        case CmpOp::GT:
+            return Builder.CreateICmpSGT(va_tv.val, vb_tv.val, "cmpgt");
+        case CmpOp::LE:
+            return Builder.CreateICmpSLE(va_tv.val, vb_tv.val, "cmple");
+        case CmpOp::GE:
+            return Builder.CreateICmpSGE(va_tv.val, vb_tv.val, "cmpge");
+        case CmpOp::EQ:
+            return Builder.CreateICmpEQ(va_tv.val, vb_tv.val, "cmpeq");
+        case CmpOp::NE:
+            return Builder.CreateICmpNE(va_tv.val, vb_tv.val, "cmpne");
+        }
+    } else {
+        assert(vb_tv.type == VarType::FLOAT);
+        llvm::CmpInst::Predicate p;
+        switch (op) {
+        case CmpOp::LT:
+            p = llvm::CmpInst::FCMP_OLT;
+            break;
+        case CmpOp::GT:
+            p = llvm::CmpInst::FCMP_OGT;
+            break;
+        case CmpOp::LE:
+            p = llvm::CmpInst::FCMP_OLE;
+            break;
+        case CmpOp::GE:
+            p = llvm::CmpInst::FCMP_OGE;
+            break;
+        case CmpOp::EQ:
+            p = llvm::CmpInst::FCMP_OEQ;
+            break;
+        case CmpOp::NE:
+            p = llvm::CmpInst::FCMP_ONE;
+            break;
+        }
+        return Builder.CreateFCmp(p, va_tv.val, vb_tv.val, "fcmp");
     }
     return nullptr;
 }
@@ -710,17 +862,72 @@ void CodeGenerator::codegenBlock(const std::vector<Stmt>& blk) {
 
 void CodeGenerator::codegenStmt(const Stmt& s) {
     switch (s.type) {
-    case Stmt::Type::YOSORO:
-        emitPrintI64(buildExpr(s.expr, true, s.line_number));
+    case Stmt::Type::YOSORO: {
+        TypedValue tv = buildExpr(s.expr, true, s.line_number);
+        const char* fmt_str = (tv.type == VarType::INT) ? "%lld " : "%f ";
+        auto* gv = Builder.CreateGlobalString(fmt_str, "fmt");
+        llvm::Value* idx0 = llvm::ConstantInt::get(I64, 0);
+        llvm::Value* fmtPtr = Builder.CreateInBoundsGEP(
+            gv->getValueType(), gv, llvm::ArrayRef<llvm::Value*>{idx0, idx0},
+            "fmt.ptr");
+        Builder.CreateCall(Printf, {fmtPtr, tv.val});
         break;
+    }
     case Stmt::Type::SET: {
-        llvm::Value* rhs = buildExpr(s.rhsExpr, true, s.line_number);
-        if (s.lhsIsArray) {
-            llvm::Value* idx = buildExpr(s.lhsIndexExpr, false, s.line_number);
-            storeArrayElem(s.lhsName, idx, rhs);
-        } else {
-            storeScalar(s.lhsName, rhs);
+        TypedValue rhs = buildExpr(s.rhsExpr, true, s.line_number);
+
+        auto it = SymbolTable.find(s.lhsName);
+        if (it == SymbolTable.end()) {
+            reportError(
+                std::format("Undeclared variable '{}' in set", s.lhsName),
+                s.line_number);
         }
+        VarType lhsType = it->second.type;
+
+        llvm::Value* valToStore = rhs.val;
+        if (lhsType == VarType::FLOAT && rhs.type == VarType::INT) {
+            valToStore = Builder.CreateSIToFP(valToStore, F64, "cast");
+        } else if (lhsType == VarType::INT && rhs.type == VarType::FLOAT) {
+            valToStore = Builder.CreateFPToSI(valToStore, I64, "cast");
+        }
+
+        if (s.lhsIsArray) {
+            TypedValue idx_tv = buildExpr(s.lhsIndexExpr, false, s.line_number);
+            if (idx_tv.type == VarType::FLOAT) {
+                reportError("Array index cannot be a float.", s.line_number);
+            }
+            storeArrayElem(s.lhsName, idx_tv.val, valToStore);
+        } else {
+            storeScalar(s.lhsName, valToStore);
+        }
+        break;
+    }
+    case Stmt::Type::INPUT: {
+        llvm::Value* ptr;
+        auto it = SymbolTable.find(s.lhsName);
+        if (it == SymbolTable.end()) {
+            reportError(
+                std::format("Undeclared variable '{}' in input", s.lhsName),
+                s.line_number);
+        }
+        VarType type = it->second.type;
+
+        if (s.lhsIsArray) {
+            TypedValue idx_tv = buildExpr(s.lhsIndexExpr, false, s.line_number);
+            if (idx_tv.type == VarType::FLOAT) {
+                reportError("Array index cannot be a float.", s.line_number);
+            }
+            ptr = getArrayElemPtr(s.lhsName, idx_tv.val);
+        } else {
+            ptr = it->second.allocaInst;
+        }
+
+        const char* fmt_str = (type == VarType::INT) ? "%lld" : "%lf";
+        auto* gv = Builder.CreateGlobalString(fmt_str, "scanf_fmt");
+        llvm::Value* fmtPtr = Builder.CreateInBoundsGEP(
+            gv->getValueType(), gv, {C0_64, C0_64}, "fmt.ptr");
+
+        Builder.CreateCall(Scanf, {fmtPtr, ptr});
         break;
     }
     case Stmt::Type::IHU: {
@@ -756,23 +963,50 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
         break;
     }
     case Stmt::Type::HOR: {
-        llvm::Value* startVal = buildExpr(s.forStart, true, s.line_number);
-        llvm::Value* endVal = buildExpr(s.forEnd, true, s.line_number);
+        auto it = SymbolTable.find(s.forVarName);
+        if (it == SymbolTable.end() || it->second.type != VarType::INT) {
+            reportError("Loop variable for 'hor' must be an integer.",
+                        s.line_number);
+        }
+
+        TypedValue startVal_tv = buildExpr(s.forStart, true, s.line_number);
+        TypedValue endVal_tv = buildExpr(s.forEnd, true, s.line_number);
+
+        llvm::Value* startVal = startVal_tv.val;
+        if (startVal_tv.type == VarType::FLOAT) {
+            startVal = Builder.CreateFPToSI(startVal, I64, "cast.for");
+        }
+        llvm::Value* endVal = endVal_tv.val;
+        if (endVal_tv.type == VarType::FLOAT) {
+            endVal = Builder.CreateFPToSI(endVal, I64, "cast.for");
+        }
+
+        llvm::Value* loopVarIndexVal = nullptr;
+        if (s.forVarIsArray) {
+            TypedValue idx_tv =
+                buildExpr(s.forVarIndexExpr, false, s.line_number);
+            if (idx_tv.type == VarType::FLOAT) {
+                reportError("Array index for 'hor' loop variable cannot be a "
+                            "float.",
+                            s.line_number);
+            }
+            loopVarIndexVal = idx_tv.val;
+        }
 
         auto storeLoopVar = [&](llvm::Value* v) {
             if (s.forVarIsArray)
-                storeArrayElem(
-                    s.forVarName,
-                    buildExpr(s.forVarIndexExpr, false, s.line_number), v);
+                storeArrayElem(s.forVarName, loopVarIndexVal, v);
             else
                 storeScalar(s.forVarName, v);
         };
         auto loadLoopVar = [&]() {
-            if (s.forVarIsArray)
-                return loadArrayElem(
-                    s.forVarName,
-                    buildExpr(s.forVarIndexExpr, false, s.line_number));
-            return loadScalar(s.forVarName);
+            if (s.forVarIsArray) {
+                return Builder.CreateLoad(
+                    I64, getArrayElemPtr(s.forVarName, loopVarIndexVal),
+                    s.forVarName + ".elem");
+            }
+            return Builder.CreateLoad(I64, it->second.allocaInst,
+                                      s.forVarName + ".val");
         };
 
         storeLoopVar(startVal);
