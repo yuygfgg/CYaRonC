@@ -294,8 +294,8 @@ class Parser {
 
     Stmt parse_block_stmt() {
         std::size_t line_num = current_line_num();
-        std::string hdr =
-            StringUtils::trim(StringUtils::rtrim_cr(current_line()).substr(1));
+        std::string t = StringUtils::trim(StringUtils::rtrim_cr(current_line()));
+        std::string hdr = StringUtils::trim(t.substr(1));
         advance(); // Consume opening brace line
 
         Stmt s{};
@@ -732,7 +732,7 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
         Builder.CreateCondBr(cond, ThenBB, MergeBB);
         Builder.SetInsertPoint(ThenBB);
         codegenBlock(s.body);
-        if (!ThenBB->getTerminator())
+        if (!Builder.GetInsertBlock()->getTerminator())
             Builder.CreateBr(MergeBB);
         Builder.SetInsertPoint(MergeBB);
         break;
@@ -750,7 +750,7 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
                              BodyBB, AfterBB);
         Builder.SetInsertPoint(BodyBB);
         codegenBlock(s.body);
-        if (!BodyBB->getTerminator())
+        if (!Builder.GetInsertBlock()->getTerminator())
             Builder.CreateBr(CondBB);
         Builder.SetInsertPoint(AfterBB);
         break;
@@ -794,7 +794,7 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
 
         Builder.SetInsertPoint(BodyBB);
         codegenBlock(s.body);
-        if (!BodyBB->getTerminator())
+        if (!Builder.GetInsertBlock()->getTerminator())
             Builder.CreateBr(StepBB);
 
         Builder.SetInsertPoint(StepBB);

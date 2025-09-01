@@ -1,0 +1,16 @@
+# 111 111 111 114514 111 111 5
+{ vars
+  i:int
+  c:int
+}
+:set c, 10
+{ ihu eq,c,10
+    { hor i, 1, 5
+      :yosoro 111
+      { ihu eq,i,3
+        :yosoro 114514
+      }
+    }
+}
+
+:yosoro i
