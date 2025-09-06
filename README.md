@@ -14,6 +14,31 @@ CYaronC implements a extended version of the CYaRon! programming language, origi
 *   Generation of LLVM IR, which can be executed directly via a JIT compiler or compiled to a native executable.
 *   Support for debug information generation using the `-g` flag for use with debuggers like GDB or LLDB.
 
+## Extended Syntax (Compared to Original Problem)
+
+This implementation adds several features to the original CYaRon! language:
+
+*   **Data Types**:
+    *   A `float` type for 64-bit floating-point numbers (C's `double`).
+    *   Arrays can be of type `float` (e.g., `array[float, 1..10]`).
+
+*   **Operators and Expressions**:
+    *   **More Arithmetic Operators**: Added `*` (multiplication), `/` (division), and `%` (modulo).
+    *   **Bitwise Operators**: Added `&` (AND), `|` (OR), and `^` (XOR) for integers.
+    *   **Unary Operators**: Supports unary `+` and `-` (e.g., `:set x, -5`).
+    *   **Operator Precedence**: Standard C-style operator precedence is applied.
+    *   **Parentheses**: `()` can be used to enforce a specific order of evaluation.
+    *   **Complex Array Indices**: Array indices can be any valid integer expression (e.g., `arr[my_array[a*2 + b] + 1]`).
+    *   **Type Promotion**: Integers are automatically promoted to floats in mixed-type expressions.
+    *   **Less strict whitespace rules**: Four-space indentation is not required.
+
+*   **Statements**:
+    *   `:input`: A new statement to read a number from standard input into a variable.
+
+*   **General**:
+    *   **Comments**: Lines starting with `#` are treated as comments.
+    *   **Variable Names**: Identifiers can contain letters, numbers, and underscores (`_`), as long as they don't start with a number.
+
 ## Building the Compiler
 
 You will need `cmake`, a C++20 compatible compiler (like `clang` or `gcc`), and `llvm` installed.

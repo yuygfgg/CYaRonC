@@ -10,6 +10,7 @@
         "cmpne",
         "cyaron",
         "cyaronc",
+        "DIGV",
         "faddtmp",
         "fnegtmp",
         "Lconst",
