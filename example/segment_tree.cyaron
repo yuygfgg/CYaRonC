@@ -1,0 +1,194 @@
+{ vars
+    n:int
+    m:int
+    i:int
+    op:int
+    x:int
+    y:int
+    k:int
+    res:int
+    N:int
+    logN:int
+    l:int
+    r:int
+    l0:int
+    r0:int
+    p:int
+    s:int
+    p_l:int
+    p_r:int
+    cur_p:int
+    cur_l:int
+    cur_r:int
+    a:array[int, 1..100001]
+    tree:array[int, 1..530000]
+    lazy:array[int, 1..530000]
+    len:array[int, 1..530000]
+    pow2:array[int, 0..18]
+}
+
+# --- Initialization ---
+:input n
+:input m
+
+:set pow2[0], 1
+{ hor i, 1, 18
+    :set pow2[i], pow2[i-1] * 2
+}
+
+:set N, 1
+:set logN, 0
+{ while lt, N, n
+    :set N, N * 2
+    :set logN, logN + 1
+}
+
+:set len[1], N
+:set i, 1
+{ while lt, i, N
+    :set len[2*i], len[i] / 2
+    :set len[2*i+1], len[i] / 2
+    :set i, i + 1
+}
+
+{ hor i, 1, n
+    :input a[i]
+}
+
+# --- Build tree ---
+{ hor i, 1, n
+    :set tree[N+i-1], a[i]
+}
+:set i, N - 1
+{ while ge, i, 1
+    :set tree[i], tree[2*i] + tree[2*i+1]
+    :set i, i - 1
+}
+
+# --- Main loop for m operations ---
+{ hor i, 1, m
+    :input op
+    { ihu eq, op, 1 # Update
+        :input x
+        :input y
+        :input k
+
+        :set l, x + N - 1
+        :set r, y + N - 1
+        :set l0, l
+        :set r0, r
+
+        # Push down from roots to leaves
+        :set s, logN
+        { while ge, s, 1
+            :set p_l, l / pow2[s]
+            :set p_r, r / pow2[s]
+            # push(p_l)
+            { ihu neq, lazy[p_l], 0
+                :set tree[2*p_l], tree[2*p_l] + lazy[p_l] * len[2*p_l]
+                :set lazy[2*p_l], lazy[2*p_l] + lazy[p_l]
+                :set tree[2*p_l+1], tree[2*p_l+1] + lazy[p_l] * len[2*p_l+1]
+                :set lazy[2*p_l+1], lazy[2*p_l+1] + lazy[p_l]
+                :set lazy[p_l], 0
+            }
+            # push(p_r) only if different
+            { ihu neq, p_l, p_r
+                { ihu neq, lazy[p_r], 0
+                    :set tree[2*p_r], tree[2*p_r] + lazy[p_r] * len[2*p_r]
+                    :set lazy[2*p_r], lazy[2*p_r] + lazy[p_r]
+                    :set tree[2*p_r+1], tree[2*p_r+1] + lazy[p_r] * len[2*p_r+1]
+                    :set lazy[2*p_r+1], lazy[2*p_r+1] + lazy[p_r]
+                    :set lazy[p_r], 0
+                }
+            }
+            :set s, s - 1
+        }
+
+        # Apply updates to interval boundaries
+        :set cur_l, l
+        :set cur_r, r
+        { while le, cur_l, cur_r
+            { ihu eq, cur_l & 1, 1 # if cur_l is a right child
+                :set tree[cur_l], tree[cur_l] + k * len[cur_l]
+                { ihu lt, cur_l, N # only non-leaf nodes have lazy tags
+                    :set lazy[cur_l], lazy[cur_l] + k
+                }
+                :set cur_l, cur_l + 1
+            }
+            { ihu eq, cur_r & 1, 0 # if cur_r is a left child
+                :set tree[cur_r], tree[cur_r] + k * len[cur_r]
+                { ihu lt, cur_r, N
+                    :set lazy[cur_r], lazy[cur_r] + k
+                }
+                :set cur_r, cur_r - 1
+            }
+            
+            :set cur_l, cur_l / 2
+            :set cur_r, cur_r / 2
+        }
+
+        # Pull up sums from leaves to roots
+        :set cur_p, l0 / 2
+        { while ge, cur_p, 1
+            :set tree[cur_p], tree[2*cur_p] + tree[2*cur_p+1] + lazy[cur_p] * len[cur_p]
+            :set cur_p, cur_p / 2
+        }
+        :set cur_p, r0 / 2
+        { while ge, cur_p, 1
+            :set tree[cur_p], tree[2*cur_p] + tree[2*cur_p+1] + lazy[cur_p] * len[cur_p]
+            :set cur_p, cur_p / 2
+        }
+    }
+    { ihu eq, op, 2 # Query
+        :input x
+        :input y
+
+        :set l, x + N - 1
+        :set r, y + N - 1
+        :set res, 0
+
+        # Push down from roots to leaves
+        :set s, logN
+        { while ge, s, 1
+            :set p_l, l / pow2[s]
+            :set p_r, r / pow2[s]
+            # push(p_l)
+            { ihu neq, lazy[p_l], 0
+                :set tree[2*p_l], tree[2*p_l] + lazy[p_l] * len[2*p_l]
+                :set lazy[2*p_l], lazy[2*p_l] + lazy[p_l]
+                :set tree[2*p_l+1], tree[2*p_l+1] + lazy[p_l] * len[2*p_l+1]
+                :set lazy[2*p_l+1], lazy[2*p_l+1] + lazy[p_l]
+                :set lazy[p_l], 0
+            }
+            # push(p_r) only if different
+            { ihu neq, p_l, p_r
+                { ihu neq, lazy[p_r], 0
+                    :set tree[2*p_r], tree[2*p_r] + lazy[p_r] * len[2*p_r]
+                    :set lazy[2*p_r], lazy[2*p_r] + lazy[p_r]
+                    :set tree[2*p_r+1], tree[2*p_r+1] + lazy[p_r] * len[2*p_r+1]
+                    :set lazy[2*p_r+1], lazy[2*p_r+1] + lazy[p_r]
+                    :set lazy[p_r], 0
+                }
+            }
+            :set s, s - 1
+        }
+
+        # Query intervals
+        :set cur_l, l
+        :set cur_r, r
+        { while le, cur_l, cur_r
+            { ihu eq, cur_l & 1, 1 # if cur_l is a right child
+                :set res, res + tree[cur_l]
+                :set cur_l, cur_l + 1
+            }
+            { ihu eq, cur_r & 1, 0 # if cur_r is a left child
+                :set res, res + tree[cur_r]
+                :set cur_r, cur_r - 1
+            }
+            
+            :set cur_l, cur_l / 2
+            :set cur_r, cur_r / 2
+        }
+        :yosoro res
+    }
+}

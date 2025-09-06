@@ -22,8 +22,15 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/DataLayout.h>
+#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/TargetParser/Host.h>
 
 // Constants
 static constexpr std::string_view IHU_PREFIX = "ihu";
@@ -505,10 +512,13 @@ class CodeGenerator {
     struct Sym {
         VarType type;
         bool isArray = false;
-        llvm::AllocaInst* allocaInst = nullptr;
+        llvm::Value* storage = nullptr; // Points to the underlying storage (alloca or global)
         int64_t L = 0, R = -1;
         llvm::ArrayType* arrTy = nullptr;
     };
+
+    // Arrays larger than this many bytes will be placed in the static data segment
+    static constexpr uint64_t LARGE_ARRAY_BYTES_THRESHOLD = 1ull << 10; // 1KB
 
     llvm::LLVMContext Ctx;
     std::unique_ptr<llvm::Module> Mod;
@@ -530,10 +540,32 @@ class CodeGenerator {
     llvm::Value* C1_64;
     llvm::Value* C10_32;
 
+    std::unique_ptr<llvm::TargetMachine> TM;
+
   public:
     explicit CodeGenerator(const std::string& moduleName)
         : Mod(std::make_unique<llvm::Module>(moduleName, Ctx)), Builder(Ctx),
           AllocaBuilder(Ctx) {
+
+        auto TargetTriple = llvm::sys::getDefaultTargetTriple();
+        Mod->setTargetTriple(TargetTriple);
+
+        std::string Error;
+        auto Target = llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
+
+        if (!Target) {
+            llvm::errs() << Error;
+            std::exit(1);
+        }
+
+        auto CPU = "generic";
+        auto Features = "";
+        llvm::TargetOptions opt;
+        auto RM = std::optional<llvm::Reloc::Model>();
+        TM.reset(
+            Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM));
+        Mod->setDataLayout(TM->createDataLayout());
+
         F64 = llvm::Type::getDoubleTy(Ctx);
         I64 = llvm::Type::getInt64Ty(Ctx);
         I32 = llvm::Type::getInt32Ty(Ctx);
@@ -611,10 +643,24 @@ class CodeGenerator {
             if (N <= 0)
                 N = 1;
             llvm::ArrayType* AT = llvm::ArrayType::get(llvmType, (uint64_t)N);
-            llvm::AllocaInst* A =
-                AllocaBuilder.CreateAlloca(AT, nullptr, vd.name);
-            Builder.CreateStore(llvm::ConstantAggregateZero::get(AT), A);
-            SymbolTable[vd.name] = {vd.type, true, A, vd.L, vd.R, AT};
+            uint64_t totalBytes = Mod->getDataLayout().getTypeAllocSize(AT);
+
+            llvm::Value* storagePtr = nullptr;
+            if (totalBytes >= LARGE_ARRAY_BYTES_THRESHOLD) {
+                // Place large arrays in static data segment as globals
+                auto* GV = new llvm::GlobalVariable(
+                    *Mod, AT, /*isConstant=*/false,
+                    llvm::GlobalValue::InternalLinkage,
+                    llvm::ConstantAggregateZero::get(AT), vd.name);
+                storagePtr = GV;
+            } else {
+                // Keep small arrays on the stack
+                llvm::AllocaInst* A =
+                    AllocaBuilder.CreateAlloca(AT, nullptr, vd.name);
+                Builder.CreateStore(llvm::ConstantAggregateZero::get(AT), A);
+                storagePtr = A;
+            }
+            SymbolTable[vd.name] = {vd.type, true, storagePtr, vd.L, vd.R, AT};
         }
     }
 
@@ -626,7 +672,7 @@ class CodeGenerator {
             idxVal, llvm::ConstantInt::get(I64, s.L), name + ".relidx");
         llvm::Type* elemType = (s.type == VarType::FLOAT) ? F64 : I64;
         llvm::Value* ptr0 = Builder.CreateInBoundsGEP(
-            s.arrTy, s.allocaInst, {C0_64, C0_64}, name + ".ptr0");
+            s.arrTy, s.storage, {C0_64, C0_64}, name + ".ptr0");
         return Builder.CreateInBoundsGEP(elemType, ptr0, rel,
                                          name + ".elemptr");
     }
@@ -634,7 +680,7 @@ class CodeGenerator {
     void storeScalar(const std::string& name, llvm::Value* v) {
         auto it = SymbolTable.find(name);
         assert(it != SymbolTable.end() && !it->second.isArray);
-        Builder.CreateStore(v, it->second.allocaInst);
+        Builder.CreateStore(v, it->second.storage);
     }
 
     void storeArrayElem(const std::string& name, llvm::Value* idxVal,
@@ -918,7 +964,7 @@ CodeGenerator::TypedValue CodeGenerator::p_parse_primary() {
         } else {
             llvm::Type* elemType =
                 (it->second.type == VarType::FLOAT) ? F64 : I64;
-            return {Builder.CreateLoad(elemType, it->second.allocaInst,
+            return {Builder.CreateLoad(elemType, it->second.storage,
                                        name + ".val"),
                     it->second.type};
         }
@@ -1055,7 +1101,7 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
             }
             ptr = getArrayElemPtr(s.lhsName, idx_tv.val);
         } else {
-            ptr = it->second.allocaInst;
+            ptr = it->second.storage;
         }
 
         const char* fmt_str = (type == VarType::INT) ? "%lld" : "%lf";
@@ -1141,7 +1187,7 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
                     I64, getArrayElemPtr(s.forVarName, loopVarIndexVal),
                     s.forVarName + ".elem");
             }
-            return Builder.CreateLoad(I64, it->second.allocaInst,
+            return Builder.CreateLoad(I64, it->second.storage,
                                       s.forVarName + ".val");
         };
 
@@ -1210,6 +1256,12 @@ std::vector<std::string> read_lines_from_file(const std::string& filename) {
 }
 
 int main(int argc, char** argv) {
+    llvm::InitializeAllTargetInfos();
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmParsers();
+    llvm::InitializeAllAsmPrinters();
+
     if (argc != 3) {
         llvm::errs() << std::format("Usage: {} <input.cyaron> <output.ll>\n",
                                     argv[0]);
