@@ -15,7 +15,7 @@ Usage:
 
 Compile to LLVM IR:
 ```bash
-./cyaronc input.cyaron output.ll
+./cyaronc [-g] input.cyaron output.ll
 ```
 
 Execute:
@@ -23,8 +23,10 @@ Execute:
 # run the LLVM IR directly
 lli output.ll
 # or compile to executable file and run it
-clang output.ll -o output
+clang output.ll [-g, -O2 ......] -o output
 ./output
+# or debug with lldb
+lldb ./output
 ```
 
 ## Test

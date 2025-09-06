@@ -15,7 +15,9 @@
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
@@ -27,6 +29,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/Path.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
@@ -139,6 +142,7 @@ struct VarDecl {
     VarType type = VarType::INT;
     bool isArray = false;
     int64_t L = 0, R = -1;
+    std::size_t line_number = 0;
 };
 
 struct Program {
@@ -526,6 +530,7 @@ std::vector<VarDecl> Parser::parse_vars_block_if_present() {
                 var_line_num);
 
         VarDecl vd;
+        vd.line_number = var_line_num;
         vd.name = StringUtils::trim(s.substr(0, colon));
         if (!StringUtils::is_valid_identifier(vd.name)) {
             reportError(std::format("Invalid identifier '{}'", vd.name),
@@ -820,12 +825,21 @@ class CodeGenerator {
 
     std::unique_ptr<llvm::TargetMachine> TM;
 
+    bool emitDebugInfo;
+    std::unique_ptr<llvm::DIBuilder> DBuilder;
+    llvm::DICompileUnit* TheCU = nullptr;
+    llvm::DIFile* TheFile = nullptr;
+    std::vector<llvm::DIScope*> LexicalBlocks;
+
   public:
-    explicit CodeGenerator(const std::string& moduleName);
+    explicit CodeGenerator(const std::string& moduleName, bool emitDebug,
+                           const std::string& fullpath);
     void generate(const Program& prog);
     void writeToFile(const std::string& outputFile);
 
   private:
+    llvm::DIScope* getCurrentDIScope();
+    llvm::DIType* getDIType(VarType type);
     void emitNewline();
     void declareVar(const VarDecl& vd);
     llvm::Value* getArrayElemPtr(const std::string& name, llvm::Value* idxVal);
@@ -840,9 +854,10 @@ class CodeGenerator {
     void codegenStmt(const Stmt& s);
 };
 
-CodeGenerator::CodeGenerator(const std::string& moduleName)
+CodeGenerator::CodeGenerator(const std::string& moduleName, bool emitDebug,
+                             const std::string& fullpath)
     : Mod(std::make_unique<llvm::Module>(moduleName, Ctx)), Builder(Ctx),
-      AllocaBuilder(Ctx) {
+      AllocaBuilder(Ctx), emitDebugInfo(emitDebug), DBuilder(nullptr) {
 
     auto TargetTriple = llvm::sys::getDefaultTargetTriple();
     Mod->setTargetTriple(TargetTriple);
@@ -862,6 +877,26 @@ CodeGenerator::CodeGenerator(const std::string& moduleName)
     TM.reset(Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM));
     Mod->setDataLayout(TM->createDataLayout());
 
+    if (emitDebugInfo) {
+        Mod->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                           llvm::DEBUG_METADATA_VERSION);
+        if (llvm::Triple(TargetTriple).isOSDarwin()) {
+            Mod->addModuleFlag(llvm::Module::Error, "Dwarf Version", 2);
+        }
+        DBuilder = std::make_unique<llvm::DIBuilder>(*Mod);
+
+        llvm::SmallString<256> path(fullpath);
+        if (std::error_code ec = llvm::sys::fs::make_absolute(path)) {
+            llvm::errs() << "Failed to make path absolute: " << ec.message();
+        }
+        llvm::StringRef directory = llvm::sys::path::parent_path(path);
+        llvm::StringRef filename = llvm::sys::path::filename(path);
+
+        TheFile = DBuilder->createFile(filename, directory);
+        TheCU = DBuilder->createCompileUnit(llvm::dwarf::DW_LANG_C, TheFile,
+                                            "CYaRon-C Compiler", 0, "", 0);
+    }
+
     F64 = llvm::Type::getDoubleTy(Ctx);
     I64 = llvm::Type::getInt64Ty(Ctx);
     I32 = llvm::Type::getInt32Ty(Ctx);
@@ -873,9 +908,28 @@ CodeGenerator::CodeGenerator(const std::string& moduleName)
     llvm::FunctionType* FT = llvm::FunctionType::get(I32, false);
     MainFn = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "main",
                                     Mod.get());
+
+    if (emitDebugInfo) {
+        unsigned LineNo = 1;
+        unsigned ScopeLine = 1;
+        auto* FnTy = DBuilder->createSubroutineType(
+            DBuilder->getOrCreateTypeArray(std::nullopt));
+        llvm::DISubprogram* SP = DBuilder->createFunction(
+            TheFile, "main", llvm::StringRef(), TheFile, LineNo, FnTy,
+            ScopeLine, llvm::DINode::FlagPrototyped,
+            llvm::DISubprogram::SPFlagDefinition);
+        MainFn->setSubprogram(SP);
+        LexicalBlocks.push_back(SP);
+    }
+
     llvm::BasicBlock* EntryBB = llvm::BasicBlock::Create(Ctx, "entry", MainFn);
     Builder.SetInsertPoint(EntryBB);
     AllocaBuilder.SetInsertPoint(EntryBB, EntryBB->begin());
+
+    if (emitDebugInfo) {
+        Builder.SetCurrentDebugLocation(
+            llvm::DILocation::get(Ctx, 1, 0, getCurrentDIScope()));
+    }
 
     Printf = Mod->getOrInsertFunction(
         "printf",
@@ -887,6 +941,20 @@ CodeGenerator::CodeGenerator(const std::string& moduleName)
         llvm::FunctionType::get(I32, llvm::PointerType::get(Ctx, 0), true));
 }
 
+llvm::DIScope* CodeGenerator::getCurrentDIScope() {
+    if (!emitDebugInfo || LexicalBlocks.empty())
+        return TheCU;
+    return LexicalBlocks.back();
+}
+
+llvm::DIType* CodeGenerator::getDIType(VarType type) {
+    if (type == VarType::FLOAT) {
+        return DBuilder->createBasicType("float", 64,
+                                         llvm::dwarf::DW_ATE_float);
+    }
+    return DBuilder->createBasicType("int", 64, llvm::dwarf::DW_ATE_signed);
+}
+
 void CodeGenerator::generate(const Program& prog) {
     for (const auto& vd : prog.varDecls) {
         declareVar(vd);
@@ -896,6 +964,10 @@ void CodeGenerator::generate(const Program& prog) {
 
     emitNewline();
     Builder.CreateRet(llvm::ConstantInt::get(I32, 0));
+
+    if (emitDebugInfo) {
+        DBuilder->finalize();
+    }
 
     if (llvm::verifyFunction(*MainFn, &llvm::errs())) {
         llvm::errs() << "Function verification failed.\n";
@@ -922,6 +994,12 @@ void CodeGenerator::emitNewline() { Builder.CreateCall(Putchar, {C10_32}); }
 
 void CodeGenerator::declareVar(const VarDecl& vd) {
     llvm::Type* llvmType = (vd.type == VarType::FLOAT) ? F64 : I64;
+
+    llvm::DIType* DITy = nullptr;
+    if (emitDebugInfo) {
+        DITy = getDIType(vd.type);
+    }
+
     if (!vd.isArray) {
         llvm::AllocaInst* A =
             AllocaBuilder.CreateAlloca(llvmType, nullptr, vd.name);
@@ -931,10 +1009,27 @@ void CodeGenerator::declareVar(const VarDecl& vd) {
             Builder.CreateStore(llvm::ConstantFP::get(F64, 0.0), A);
         }
         SymbolTable[vd.name] = {vd.type, false, A, 0, -1, nullptr};
+        if (emitDebugInfo) {
+            llvm::DILocalVariable* D = DBuilder->createAutoVariable(
+                getCurrentDIScope(), vd.name, TheFile, vd.line_number, DITy,
+                true);
+            DBuilder->insertDeclare(A, D, DBuilder->createExpression(),
+                                    llvm::DILocation::get(Ctx, vd.line_number,
+                                                          0,
+                                                          getCurrentDIScope()),
+                                    AllocaBuilder.GetInsertBlock());
+        }
     } else {
         int64_t N = (vd.R >= vd.L) ? (vd.R - vd.L + 1) : 0;
         if (N <= 0)
             N = 1;
+
+        if (emitDebugInfo) {
+            auto Subscript = DBuilder->getOrCreateSubrange(vd.L, N);
+            DITy = DBuilder->createArrayType(
+                (uint64_t)N, 0, DITy, DBuilder->getOrCreateArray({Subscript}));
+        }
+
         llvm::ArrayType* AT = llvm::ArrayType::get(llvmType, (uint64_t)N);
         uint64_t totalBytes = Mod->getDataLayout().getTypeAllocSize(AT);
 
@@ -946,12 +1041,28 @@ void CodeGenerator::declareVar(const VarDecl& vd) {
                 llvm::GlobalValue::InternalLinkage,
                 llvm::ConstantAggregateZero::get(AT), vd.name);
             storagePtr = GV;
+            if (emitDebugInfo) {
+                auto* DIGV = DBuilder->createGlobalVariableExpression(
+                    TheCU, vd.name, vd.name, TheFile, vd.line_number, DITy,
+                    false);
+                GV->addDebugInfo(DIGV);
+            }
         } else {
             // Keep small arrays on the stack
             llvm::AllocaInst* A =
                 AllocaBuilder.CreateAlloca(AT, nullptr, vd.name);
             Builder.CreateStore(llvm::ConstantAggregateZero::get(AT), A);
             storagePtr = A;
+            if (emitDebugInfo) {
+                llvm::DILocalVariable* D = DBuilder->createAutoVariable(
+                    getCurrentDIScope(), vd.name, TheFile, vd.line_number, DITy,
+                    true);
+                DBuilder->insertDeclare(
+                    A, D, DBuilder->createExpression(),
+                    llvm::DILocation::get(Ctx, vd.line_number, 0,
+                                          getCurrentDIScope()),
+                    AllocaBuilder.GetInsertBlock());
+            }
         }
         SymbolTable[vd.name] = {vd.type, true, storagePtr, vd.L, vd.R, AT};
     }
@@ -984,6 +1095,10 @@ void CodeGenerator::storeArrayElem(const std::string& name, llvm::Value* idxVal,
 CodeGenerator::TypedValue CodeGenerator::codegenExpr(const Expr* expr) {
     if (!expr) {
         return {C0_64, VarType::INT};
+    }
+    if (emitDebugInfo) {
+        Builder.SetCurrentDebugLocation(llvm::DILocation::get(
+            Ctx, expr->line_number, 0, getCurrentDIScope()));
     }
     switch (expr->type) {
     case Expr::Type::LITERAL: {
@@ -1116,8 +1231,9 @@ CodeGenerator::TypedValue CodeGenerator::codegenExpr(const Expr* expr) {
                 expr->line_number);
 }
 
-llvm::Value* CodeGenerator::buildCond(CmpOp op, const Expr* a, const Expr* b,
-                                      std::size_t line_number) {
+llvm::Value*
+CodeGenerator::buildCond(CmpOp op, const Expr* a, const Expr* b,
+                         [[maybe_unused]] std::size_t line_number) {
     TypedValue va_tv = codegenExpr(a);
     TypedValue vb_tv = codegenExpr(b);
 
@@ -1180,6 +1296,10 @@ void CodeGenerator::codegenBlock(const std::vector<Stmt>& blk) {
 }
 
 void CodeGenerator::codegenStmt(const Stmt& s) {
+    if (emitDebugInfo) {
+        Builder.SetCurrentDebugLocation(
+            llvm::DILocation::get(Ctx, s.line_number, 0, getCurrentDIScope()));
+    }
     switch (s.type) {
     case Stmt::Type::YOSORO: {
         TypedValue tv = codegenExpr(s.yosoroExpr.get());
@@ -1258,7 +1378,19 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
             llvm::BasicBlock::Create(Ctx, "if.end", MainFn);
         Builder.CreateCondBr(cond, ThenBB, MergeBB);
         Builder.SetInsertPoint(ThenBB);
+
+        if (emitDebugInfo) {
+            auto* LB = DBuilder->createLexicalBlock(getCurrentDIScope(),
+                                                    TheFile, s.line_number, 0);
+            LexicalBlocks.push_back(LB);
+        }
+
         codegenBlock(s.body);
+
+        if (emitDebugInfo) {
+            LexicalBlocks.pop_back();
+        }
+
         if (!Builder.GetInsertBlock()->getTerminator())
             Builder.CreateBr(MergeBB);
         Builder.SetInsertPoint(MergeBB);
@@ -1273,17 +1405,41 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
             llvm::BasicBlock::Create(Ctx, "while.end", MainFn);
         Builder.CreateBr(CondBB);
         Builder.SetInsertPoint(CondBB);
+
+        if (emitDebugInfo) {
+            Builder.SetCurrentDebugLocation(llvm::DILocation::get(
+                Ctx, s.line_number, 0, getCurrentDIScope()));
+        }
+
         Builder.CreateCondBr(
             buildCond(s.op, s.condA.get(), s.condB.get(), s.line_number),
             BodyBB, AfterBB);
         Builder.SetInsertPoint(BodyBB);
+
+        if (emitDebugInfo) {
+            auto* LB = DBuilder->createLexicalBlock(getCurrentDIScope(),
+                                                    TheFile, s.line_number, 0);
+            LexicalBlocks.push_back(LB);
+        }
+
         codegenBlock(s.body);
+
+        if (emitDebugInfo) {
+            LexicalBlocks.pop_back();
+        }
+
         if (!Builder.GetInsertBlock()->getTerminator())
             Builder.CreateBr(CondBB);
         Builder.SetInsertPoint(AfterBB);
         break;
     }
     case Stmt::Type::HOR: {
+        if (emitDebugInfo) {
+            auto* LB = DBuilder->createLexicalBlock(getCurrentDIScope(),
+                                                    TheFile, s.line_number, 0);
+            LexicalBlocks.push_back(LB);
+        }
+
         auto it = SymbolTable.find(s.forVarName);
         if (it == SymbolTable.end() || it->second.type != VarType::INT) {
             reportError("Loop variable for 'hor' must be an integer.",
@@ -1369,6 +1525,10 @@ void CodeGenerator::codegenStmt(const Stmt& s) {
         Builder.CreateBr(FinalMergeBB);
 
         Builder.SetInsertPoint(FinalMergeBB);
+
+        if (emitDebugInfo) {
+            LexicalBlocks.pop_back();
+        }
         break;
     }
     }
@@ -1400,20 +1560,29 @@ int main(int argc, char** argv) {
     llvm::InitializeAllAsmParsers();
     llvm::InitializeAllAsmPrinters();
 
-    if (argc != 3) {
-        llvm::errs() << std::format("Usage: {} <input.cyaron> <output.ll>\n",
-                                    argv[0]);
+    bool emitDebug = false;
+    std::string inputFile;
+    std::string outputFile;
+
+    if (argc == 4 && std::string(argv[1]) == "-g") {
+        emitDebug = true;
+        inputFile = argv[2];
+        outputFile = argv[3];
+    } else if (argc == 3 && std::string(argv[1]) != "-g") {
+        inputFile = argv[1];
+        outputFile = argv[2];
+    } else {
+        llvm::errs() << std::format(
+            "Usage: {} [-g] <input.cyaron> <output.ll>\n", argv[0]);
         return 1;
     }
-    std::string inputFile = argv[1];
-    std::string outputFile = argv[2];
 
     auto lines = read_lines_from_file(inputFile);
 
     Parser parser(std::move(lines));
     Program program = parser.parse_program();
 
-    CodeGenerator generator("CYaRonModule");
+    CodeGenerator generator("CYaRonModule", emitDebug, inputFile);
     generator.generate(program);
     generator.writeToFile(outputFile);
 
