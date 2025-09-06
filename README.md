@@ -1,111 +1,208 @@
 # CYaRonC
 
-CYaRon! language compiler to LLVM IR.
+CYaRonC is a compiler for the CYaRon! programming language. It translates CYaRon! source code into LLVM Intermediate Representation (IR).
 
-## Usage
+## Features
 
-Build:
+CYaronC implements a extended version of the CYaRon! programming language, originally proposed in [Luogu P3695](https://www.luogu.com.cn/problem/P3695).
+
+*   Static typing with `int` and `float` types.
+*   One-dimensional arrays with custom, inclusive index ranges.
+*   Standard input and output operations.
+*   C-style expressions with arithmetic, comparison, and bitwise operators.
+*   `ihu`, `hor`, and `while` control flow statements with a unique syntax.
+*   Generation of LLVM IR, which can be executed directly via a JIT compiler or compiled to a native executable.
+*   Support for debug information generation using the `-g` flag for use with debuggers like GDB or LLDB.
+
+## Building the Compiler
+
+You will need `cmake`, a C++20 compatible compiler (like `clang` or `gcc`), and `llvm` installed.
+
 ```bash
+# Create a build directory
 mkdir -p build && cd build
+
+# Configure and build the project
 cmake -DCMAKE_BUILD_TYPE=Release ..
 make
 ```
 
-Usage:
+## Compiler Usage
 
-Compile to LLVM IR:
+### 1. Compile to LLVM IR
+
+Use the `cyaronc` executable to compile a `.cyaron` source file into a `.ll` LLVM IR file.
+
 ```bash
-./cyaronc [-g] input.cyaron output.ll
+# Syntax
+./cyaronc [-g] <input.cyaron> <output.ll>
+
+# Example
+./cyaronc example/segment_tree.cyaron output.ll
+
+# Example with debug symbols
+./cyaronc -g example/segment_tree.cyaron output.ll
 ```
+*   The optional `-g` flag adds debug information to the LLVM IR.
 
-Execute:
+### 2. Execute the Code
+
+You can run the generated LLVM IR in several ways:
+
 ```bash
-# run the LLVM IR directly
+# 1. Interpret the LLVM IR directly using lli
 lli output.ll
-# or compile to executable file and run it
-clang output.ll [-g, -O2 ......] -o output
-./output
-# or debug with lldb
-lldb ./output
+
+# 2. Compile the LLVM IR to a native executable using clang
+clang output.ll -o my_program
+
+# Run the executable
+./my_program
+
+# 3. Compile with debug symbols and use a debugger
+clang -g output.ll -o my_program_debug
+lldb ./my_program_debug
 ```
 
-## Test
-`lli` is required to be in the PATH.
-```
-python3 test/run_tests.py
+## Language Syntax
+
+### Comments
+
+Comments start with a `#` and continue to the end of the line.
+
+```cyaron
+# This is a comment.
 ```
 
-## Reference
+### Variables
 
-<https://www.luogu.com.cn/problem/P3695>
+All variables must be declared in a `{vars ...}` block at the top of the file. Variables are initialized to zero by default.
 
-```
+```cyaron
 { vars
-    chika:int
-    you:int
-    ruby:array[int, 1..2]
-    i:int
+    my_int: int
+    my_float: float
+    my_array: array[int, 1..10]
 }
-# 以上变量默认值均为0
-# 变量名只可是英文字母。
+```
 
-# yosoro语句可以输出一个数字，随后跟一个空格。
-:yosoro 2
-# 输出2和一个空格(以下不再提到空格)。
+#### Types
 
-# set语句可以为变量赋值。
-# 运算符只支持加减号即可。
-:set chika, 1
-:set you, 2
-:yosoro chika + you
-# 上一条语句将输出3
+*   `int`: A 64-bit signed integer, same as `long long` in C.
+*   `float`: A 64-bit floating-point number, same as `double` in C.
+*   `array[<type>, <start>..<end>]`: A one-dimensional array of `int` or `float` with an inclusive index range from `<start>` to `<end>`.
 
-# 以下的判断语句均使用以下的格式：
-# 操作符，表达式，表达式
-# 例如eq, a, 1即C语言中 a==1
-# 所有操作符包括: lt: < gt: > le: <= ge: >= eq: == neq: !=
+### Statements
 
-# 日本来的CYaRon三人没法正确地发出if这个音，因此她们就改成了ihu。
-{ ihu eq, chika, 1
-    :set you, 3
+#### Output: `:yosoro`
+
+Prints the value of an expression to standard output, followed by a space.
+
+```cyaron
+:yosoro 123          # Prints "123 "
+:yosoro my_int + 5   # Prints the result of the expression and a space
+```
+
+#### Assignment: `:set`
+
+Assigns a value to a variable or an array element.
+
+```cyaron
+:set my_int, 100
+:set my_array[1], 200
+:set my_int, my_int + my_array[1]
+```
+
+#### Input: `:input`
+
+Reads a number from standard input and stores it in a variable or array element.
+
+```cyaron
+:input my_int
+:input my_array[5]
+```
+
+### Control Flow
+
+Control flow statements use a block structure defined by `{...}`.
+
+#### Comparison Operators
+
+The following operators are used in all control flow statements:
+*   `lt`: Less than (`<`)
+*   `gt`: Greater than (`>`)
+*   `le`: Less than or equal to (`<=`)
+*   `ge`: Greater than or equal to (`>=`)
+*   `eq`: Equal to (`==`)
+*   `neq`: Not equal to (`!=`)
+
+#### If Statement: `{ihu ...}`
+
+The `ihu` statement executes a block of code if a condition is true. There is no `else` branch.
+
+```cyaron
+# Syntax: {ihu <op>, <expr1>, <expr2> ... }
+
+{ihu eq, my_int, 10
     :yosoro 1
 }
-# 输出1
-# 以上是ihu语句，无需支持else。
+```
 
-# hor语句同理，
-# for i=1 to you如下
-{ hor i, 1, you
-    :yosoro i
+#### For Loop: `{hor ...}`
+
+The `hor` statement creates a loop that iterates over an inclusive range. The loop variable must be an integer.
+When the loop ends, the loop variable is set to the end value.
+
+```cyaron
+# Syntax: {hor <var>, <start_expr>, <end_expr> ... }
+# Loops from start_expr to end_expr (inclusive).
+
+{hor i, 1, 5
+    :yosoro i  # Prints "1 2 3 4 5 "
 }
-# 输出1 2 3
+```
 
-# 如下是while和数组的使用方法。
+#### While Loop: `{while ...}`
+
+The `while` statement executes a block of code as long as a condition is true.
+
+```cyaron
+# Syntax: {while <op>, <expr1>, <expr2> ... }
+
 :set i, 1
-{ while le, i, 2
-    :yosoro i
-    :set ruby[i], i+1
-    :yosoro ruby[i]
-    :set i, i+1
+{while le, i, 3
+    :yosoro i  # Prints "1 2 3 "
+    :set i, i + 1
 }
-# 输出1 2 2 3
-
-# 数组不会出现嵌套，即只会有a[i]、a[i+2]而不会有类似于a[i+b[i]]这样的。
-
-# CYaRon语的最后一行，一定是一个换行。
 ```
 
-Extensions:
+### Expressions
+
+#### Operators
+
+*   **Arithmetic**: `+`, `-`, `*`, `/`, `%` (modulo)
+*   **Bitwise**: `|`, `&`, `^` (only operate on integers)
+
+#### Type Promotion
+
+In an expression involving both `int` and `float` types, integers are automatically promoted to floats for the calculation. The result will be a `float`.
+
+```cyaron
+:yosoro (5 + 0.5)  # Prints "5.500000 "
 ```
-{ vars
-  a:float
-  arr:array[float, 0..1]
-  num_float:int
-}
-:input a
-:input arr[0]
-:set num_float, arr[0] + a
-:yosoro num_float
-:yosoro (a + arr[0]) / 2 # As long as there is a floating-point number in the expression, the integer is converted to a floating-point number for computation, and the final result is also a floating-point number.
-:yosoro 1 | 2 # Bitwise operators only work on integers.
+
+#### Precedence
+
+Use parentheses `()` to group expressions and enforce a specific order of evaluation.
+
+```cyaron
+:yosoro (2 + 3) * 4  # Prints "20 "
+```
+
+## Running Tests
+
+The test suite requires `lli` to be in your system's `PATH`.
+
+```bash
+python3 test/run_tests.py
 ```
