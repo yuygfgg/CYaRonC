@@ -1,4 +1,4 @@
-# Bitwise OR '|' operator requires integer operands.
+# Bitwise or modulo operator requires integer operands.
 { vars
     a: float
 }
