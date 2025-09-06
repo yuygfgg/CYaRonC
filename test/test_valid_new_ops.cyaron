@@ -1,0 +1,9 @@
+# 7 9 3 1 7 1 6 13.000000 
+:yosoro 1 + 2 * 3
+:yosoro (1 + 2) * 3
+:yosoro 10 / 3
+:yosoro 10 % 3
+:yosoro 7 | 1
+:yosoro 7 & 1
+:yosoro 7 ^ 1
+:yosoro (1.5 + 2.5) * 4.0 - 3.0

@@ -104,4 +104,6 @@ Extensions:
 :input arr[0]
 :set num_float, arr[0] + a
 :yosoro num_float
+:yosoro (a + arr[0]) / 2 # As long as there is a floating-point number in the expression, the integer is converted to a floating-point number for computation, and the final result is also a floating-point number.
+:yosoro 1 | 2 # Bitwise operators only work on integers.
 ```

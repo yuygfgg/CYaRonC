@@ -1,0 +1,6 @@
+# Modulo '%' operator requires integer operands.
+{ vars
+    a: float
+}
+:set a, 5.0
+:yosoro a % 2

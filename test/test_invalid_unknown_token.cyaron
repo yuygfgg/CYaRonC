@@ -1,2 +1,2 @@
-# Unknown token '/' in expression
-:yosoro 2/3
+# Extra characters at end of expression: '$3'
+:yosoro 2$3

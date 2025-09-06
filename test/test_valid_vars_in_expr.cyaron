@@ -1,0 +1,19 @@
+# 23 35 71.100000 1.200000
+{ vars
+    a: int
+    b: int
+    c: int
+    d: float
+    e: float
+    f: float
+}
+:set a, 2
+:set b, 5
+:set c, 7
+:set d, 0.1
+:set e, 1.1
+:yosoro a + b * c - (a+b) * 2
+:yosoro (a + b) * (c - a)
+:yosoro (a + b) / d + e
+:set f, d + e
+:yosoro f / 1

@@ -1,0 +1,6 @@
+# Bitwise OR '|' operator requires integer operands.
+{ vars
+    a: float
+}
+:set a, 1.0
+:yosoro a | 2

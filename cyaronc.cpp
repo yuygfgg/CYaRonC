@@ -644,156 +644,292 @@ class CodeGenerator {
 
     TypedValue buildExpr(const std::string& s, bool allowArray,
                          std::size_t line_number);
-    TypedValue buildExprCore(const std::string& t, bool allowArray,
-                             std::size_t line_number);
+
+    // Expression parsing state
+    const std::string* p_expr_str = nullptr;
+    std::size_t p_expr_pos = 0;
+    bool p_allow_array = false;
+    std::size_t p_line_number = 0;
+
+    // Helper methods for parsing
+    char p_peek();
+    void p_consume();
+
+    // Parsing functions for precedence levels
+    TypedValue p_parse_expr();
+    TypedValue p_parse_bitwise_or();
+    TypedValue p_parse_bitwise_xor();
+    TypedValue p_parse_bitwise_and();
+    TypedValue p_parse_additive();
+    TypedValue p_parse_multiplicative();
+    TypedValue p_parse_factor();
+    TypedValue p_parse_primary();
     llvm::Value* buildCond(CmpOp op, const std::string& a, const std::string& b,
                            std::size_t line_number);
     void codegenBlock(const std::vector<Stmt>& blk);
     void codegenStmt(const Stmt& s);
 };
 
+char CodeGenerator::p_peek() {
+    if (p_expr_pos >= p_expr_str->size()) {
+        return '\0';
+    }
+    return (*p_expr_str)[p_expr_pos];
+}
+
+void CodeGenerator::p_consume() { p_expr_pos++; }
+
 CodeGenerator::TypedValue CodeGenerator::buildExpr(const std::string& s,
                                                    bool allowArray,
                                                    std::size_t line_number) {
-    return buildExprCore(StringUtils::remove_spaces(s), allowArray,
-                         line_number);
-}
-
-CodeGenerator::TypedValue
-CodeGenerator::buildExprCore(const std::string& t, bool allowArray,
-                             std::size_t line_number) {
-    std::size_t i = 0, n = t.size();
-    TypedValue res;
-    int32_t sign = +1;
-
-    auto applySignAndAcc = [&](TypedValue term) {
-        if (sign == -1) {
-            if (term.type == VarType::INT) {
-                term.val = Builder.CreateSub(C0_64, term.val, "negtmp");
-            } else {
-                term.val = Builder.CreateFSub(llvm::ConstantFP::get(F64, 0.0),
-                                              term.val, "fnegtmp");
-            }
-        }
-
-        if (!res.val) {
-            res = term;
-        } else {
-            TypedValue lhs = res;
-            TypedValue rhs = term;
-            if (lhs.type == VarType::FLOAT && rhs.type == VarType::INT) {
-                rhs.val = Builder.CreateSIToFP(rhs.val, F64, "cast");
-                rhs.type = VarType::FLOAT;
-            } else if (lhs.type == VarType::INT && rhs.type == VarType::FLOAT) {
-                lhs.val = Builder.CreateSIToFP(lhs.val, F64, "cast");
-                lhs.type = VarType::FLOAT;
-            }
-
-            if (lhs.type == VarType::INT) { // both are ints
-                assert(rhs.type == VarType::INT);
-                res.val = Builder.CreateAdd(lhs.val, rhs.val, "addtmp");
-                res.type = VarType::INT;
-            } else { // both are floats
-                assert(rhs.type == VarType::FLOAT);
-                res.val = Builder.CreateFAdd(lhs.val, rhs.val, "faddtmp");
-                res.type = VarType::FLOAT;
-            }
-        }
-        sign = +1;
-    };
-
-    while (i < n) {
-        if (t[i] == '+') {
-            sign = +1;
-            ++i;
-            continue;
-        }
-        if (t[i] == '-') {
-            sign = -1;
-            ++i;
-            continue;
-        }
-        if (i >= n)
-            break;
-
-        if (std::isdigit(static_cast<unsigned char>(t[i]))) {
-            std::size_t start_i = i;
-            bool is_float = false;
-            while (i < n && std::isdigit(static_cast<unsigned char>(t[i])))
-                i++;
-            if (i < n && t[i] == '.') {
-                is_float = true;
-                i++;
-                while (i < n && std::isdigit(static_cast<unsigned char>(t[i])))
-                    i++;
-            }
-            std::string num_str = t.substr(start_i, i - start_i);
-            if (is_float) {
-                double v = std::stod(num_str);
-                applySignAndAcc(
-                    {llvm::ConstantFP::get(F64, v), VarType::FLOAT});
-            } else {
-                int64_t v = std::stoll(num_str);
-                applySignAndAcc({llvm::ConstantInt::get(I64, v), VarType::INT});
-            }
-        } else if (std::isalpha(static_cast<unsigned char>(t[i])) ||
-                   t[i] == '_') {
-            std::string name;
-            name.push_back(t[i++]);
-            while (i < n && (std::isalnum(static_cast<unsigned char>(t[i])) ||
-                             t[i] == '_'))
-                name.push_back(t[i++]);
-
-            auto it = SymbolTable.find(name);
-            if (it == SymbolTable.end()) {
-                reportError(std::format("Unknown variable '{}'", name),
-                            line_number);
-            }
-
-            if (i < n && t[i] == '[') {
-                if (!allowArray) {
-                    reportError("Unexpected array access in this expression.",
-                                line_number);
-                }
-                std::size_t start = i + 1, j = start, d = 1;
-                while (j < n && d > 0) {
-                    if (t[j] == '[')
-                        d++;
-                    else if (t[j] == ']')
-                        d--;
-                    j++;
-                }
-                TypedValue idx_tv = buildExpr(t.substr(start, j - 1 - start),
-                                              false, line_number);
-                if (idx_tv.type == VarType::FLOAT) {
-                    reportError("Array index cannot be a float.", line_number);
-                }
-                i = j;
-
-                llvm::Value* ptr = getArrayElemPtr(name, idx_tv.val);
-                llvm::Type* elemType =
-                    (it->second.type == VarType::FLOAT) ? F64 : I64;
-                applySignAndAcc(
-                    {Builder.CreateLoad(elemType, ptr, name + ".elem"),
-                     it->second.type});
-            } else {
-                llvm::Type* elemType =
-                    (it->second.type == VarType::FLOAT) ? F64 : I64;
-                applySignAndAcc(
-                    {Builder.CreateLoad(elemType, it->second.allocaInst,
-                                        name + ".val"),
-                     it->second.type});
-            }
-        } else {
-            reportError(std::format("Unknown token '{}' in expression",
-                                    std::string(1, t[i])),
-                        line_number);
-        }
-    }
-    if (!res.val) {
+    std::string t = StringUtils::remove_spaces(s);
+    if (t.empty()) {
         return {C0_64, VarType::INT};
     }
-    return res;
+    this->p_expr_str = &t;
+    this->p_expr_pos = 0;
+    this->p_allow_array = allowArray;
+    this->p_line_number = line_number;
+
+    TypedValue result = p_parse_expr();
+
+    if (this->p_expr_pos != t.size()) {
+        reportError(std::format("Extra characters at end of expression: '{}'",
+                                t.substr(p_expr_pos)),
+                    line_number);
+    }
+    return result;
+}
+
+CodeGenerator::TypedValue CodeGenerator::p_parse_expr() {
+    return p_parse_bitwise_or();
+}
+
+CodeGenerator::TypedValue CodeGenerator::p_parse_bitwise_or() {
+    TypedValue lhs = p_parse_bitwise_xor();
+    while (p_peek() == '|') {
+        p_consume();
+        TypedValue rhs = p_parse_bitwise_xor();
+        if (lhs.type != VarType::INT || rhs.type != VarType::INT) {
+            reportError("Bitwise OR '|' operator requires integer operands.",
+                        p_line_number);
+        }
+        lhs.val = Builder.CreateOr(lhs.val, rhs.val, "ortmp");
+        lhs.type = VarType::INT;
+    }
+    return lhs;
+}
+
+CodeGenerator::TypedValue CodeGenerator::p_parse_bitwise_xor() {
+    TypedValue lhs = p_parse_bitwise_and();
+    while (p_peek() == '^') {
+        p_consume();
+        TypedValue rhs = p_parse_bitwise_and();
+        if (lhs.type != VarType::INT || rhs.type != VarType::INT) {
+            reportError("Bitwise XOR '^' operator requires integer operands.",
+                        p_line_number);
+        }
+        lhs.val = Builder.CreateXor(lhs.val, rhs.val, "xortmp");
+        lhs.type = VarType::INT;
+    }
+    return lhs;
+}
+
+CodeGenerator::TypedValue CodeGenerator::p_parse_bitwise_and() {
+    TypedValue lhs = p_parse_additive();
+    while (p_peek() == '&') {
+        p_consume();
+        TypedValue rhs = p_parse_additive();
+        if (lhs.type != VarType::INT || rhs.type != VarType::INT) {
+            reportError("Bitwise AND '&' operator requires integer operands.",
+                        p_line_number);
+        }
+        lhs.val = Builder.CreateAnd(lhs.val, rhs.val, "andtmp");
+        lhs.type = VarType::INT;
+    }
+    return lhs;
+}
+
+CodeGenerator::TypedValue CodeGenerator::p_parse_additive() {
+    TypedValue lhs = p_parse_multiplicative();
+    while (p_peek() == '+' || p_peek() == '-') {
+        char op = p_peek();
+        p_consume();
+        TypedValue rhs = p_parse_multiplicative();
+
+        if (lhs.type == VarType::FLOAT && rhs.type == VarType::INT) {
+            rhs.val = Builder.CreateSIToFP(rhs.val, F64, "cast");
+            rhs.type = VarType::FLOAT;
+        } else if (lhs.type == VarType::INT && rhs.type == VarType::FLOAT) {
+            lhs.val = Builder.CreateSIToFP(lhs.val, F64, "cast");
+            lhs.type = VarType::FLOAT;
+        }
+
+        if (lhs.type == VarType::INT) {
+            assert(rhs.type == VarType::INT);
+            if (op == '+') {
+                lhs.val = Builder.CreateAdd(lhs.val, rhs.val, "addtmp");
+            } else {
+                lhs.val = Builder.CreateSub(lhs.val, rhs.val, "subtmp");
+            }
+        } else {
+            assert(rhs.type == VarType::FLOAT);
+            if (op == '+') {
+                lhs.val = Builder.CreateFAdd(lhs.val, rhs.val, "faddtmp");
+            } else {
+                lhs.val = Builder.CreateFSub(lhs.val, rhs.val, "fsubtmp");
+            }
+            lhs.type = VarType::FLOAT;
+        }
+    }
+    return lhs;
+}
+
+CodeGenerator::TypedValue CodeGenerator::p_parse_multiplicative() {
+    TypedValue lhs = p_parse_factor();
+    while (p_peek() == '*' || p_peek() == '/' || p_peek() == '%') {
+        char op = p_peek();
+        p_consume();
+        TypedValue rhs = p_parse_factor();
+
+        if (op == '%') {
+            if (lhs.type != VarType::INT || rhs.type != VarType::INT) {
+                reportError("Modulo '%' operator requires integer operands.",
+                            p_line_number);
+            }
+            lhs.val = Builder.CreateSRem(lhs.val, rhs.val, "remtmp");
+            lhs.type = VarType::INT;
+            continue;
+        }
+
+        if (lhs.type == VarType::FLOAT && rhs.type == VarType::INT) {
+            rhs.val = Builder.CreateSIToFP(rhs.val, F64, "cast");
+            rhs.type = VarType::FLOAT;
+        } else if (lhs.type == VarType::INT && rhs.type == VarType::FLOAT) {
+            lhs.val = Builder.CreateSIToFP(lhs.val, F64, "cast");
+            lhs.type = VarType::FLOAT;
+        }
+
+        if (lhs.type == VarType::INT) {
+            assert(rhs.type == VarType::INT);
+            if (op == '*') {
+                lhs.val = Builder.CreateMul(lhs.val, rhs.val, "multmp");
+            } else { // op == '/'
+                lhs.val = Builder.CreateSDiv(lhs.val, rhs.val, "divtmp");
+            }
+        } else {
+            assert(rhs.type == VarType::FLOAT);
+            if (op == '*') {
+                lhs.val = Builder.CreateFMul(lhs.val, rhs.val, "fmultmp");
+            } else { // op == '/'
+                lhs.val = Builder.CreateFDiv(lhs.val, rhs.val, "fdivtmp");
+            }
+            lhs.type = VarType::FLOAT;
+        }
+    }
+    return lhs;
+}
+
+CodeGenerator::TypedValue CodeGenerator::p_parse_factor() {
+    if (p_peek() == '+') {
+        p_consume();
+        return p_parse_factor();
+    }
+    if (p_peek() == '-') {
+        p_consume();
+        TypedValue val = p_parse_factor();
+        if (val.type == VarType::INT) {
+            val.val = Builder.CreateNeg(val.val, "negtmp");
+        } else {
+            val.val = Builder.CreateFNeg(val.val, "fnegtmp");
+        }
+        return val;
+    }
+    return p_parse_primary();
+}
+
+CodeGenerator::TypedValue CodeGenerator::p_parse_primary() {
+    const std::string& t = *p_expr_str;
+    std::size_t& i = p_expr_pos;
+
+    if (p_peek() == '(') {
+        p_consume();
+        TypedValue val = p_parse_expr();
+        if (p_peek() != ')') {
+            reportError("Mismatched parentheses, expected ')'", p_line_number);
+        }
+        p_consume();
+        return val;
+    }
+
+    if (std::isdigit(p_peek())) {
+        std::size_t start_i = i;
+        bool is_float = false;
+        while (i < t.size() && std::isdigit(t[i]))
+            i++;
+        if (i < t.size() && t[i] == '.') {
+            is_float = true;
+            i++;
+            while (i < t.size() && std::isdigit(t[i]))
+                i++;
+        }
+        std::string num_str = t.substr(start_i, i - start_i);
+        if (is_float) {
+            double v = std::stod(num_str);
+            return {llvm::ConstantFP::get(F64, v), VarType::FLOAT};
+        } else {
+            int64_t v = std::stoll(num_str);
+            return {llvm::ConstantInt::get(I64, v), VarType::INT};
+        }
+    }
+
+    if (std::isalpha(p_peek()) || p_peek() == '_') {
+        std::string name;
+        name.push_back(t[i++]);
+        while (i < t.size() && (std::isalnum(t[i]) || t[i] == '_'))
+            name.push_back(t[i++]);
+
+        auto it = SymbolTable.find(name);
+        if (it == SymbolTable.end()) {
+            reportError(std::format("Unknown variable '{}'", name),
+                        p_line_number);
+        }
+
+        if (p_peek() == '[') {
+            if (!p_allow_array) {
+                reportError("Unexpected array access in this expression.",
+                            p_line_number);
+            }
+            p_consume(); // '['
+            TypedValue idx_tv = p_parse_expr();
+            if (idx_tv.type == VarType::FLOAT) {
+                reportError("Array index cannot be a float.", p_line_number);
+            }
+            if (p_peek() != ']') {
+                reportError("Mismatched brackets, expected ']'", p_line_number);
+            }
+            p_consume(); // ']'
+
+            llvm::Value* ptr = getArrayElemPtr(name, idx_tv.val);
+            llvm::Type* elemType =
+                (it->second.type == VarType::FLOAT) ? F64 : I64;
+            return {Builder.CreateLoad(elemType, ptr, name + ".elem"),
+                    it->second.type};
+        } else {
+            llvm::Type* elemType =
+                (it->second.type == VarType::FLOAT) ? F64 : I64;
+            return {Builder.CreateLoad(elemType, it->second.allocaInst,
+                                       name + ".val"),
+                    it->second.type};
+        }
+    }
+
+    if (p_peek() == '\0') {
+        reportError("Unexpected end of expression", p_line_number);
+    }
+    reportError(
+        std::format("Invalid expression token '{}'", std::string(1, p_peek())),
+        p_line_number);
 }
 
 llvm::Value* CodeGenerator::buildCond(CmpOp op, const std::string& a,
