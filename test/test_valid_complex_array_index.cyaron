@@ -1,0 +1,8 @@
+# 3
+{  vars
+    arr:array[int, 0..2]
+    arr2:array[int, 0..2]
+}
+:set arr[1], 1
+:set arr2[2], 3
+:yosoro arr2[(arr[1] + 3) / 2]
