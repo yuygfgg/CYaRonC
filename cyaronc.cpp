@@ -14,16 +14,16 @@
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Verifier.h>
-#include <llvm/IR/GlobalVariable.h>
-#include <llvm/IR/DataLayout.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/TargetSelect.h>
@@ -512,12 +512,14 @@ class CodeGenerator {
     struct Sym {
         VarType type;
         bool isArray = false;
-        llvm::Value* storage = nullptr; // Points to the underlying storage (alloca or global)
+        llvm::Value* storage =
+            nullptr; // Points to the underlying storage (alloca or global)
         int64_t L = 0, R = -1;
         llvm::ArrayType* arrTy = nullptr;
     };
 
-    // Arrays larger than this many bytes will be placed in the static data segment
+    // Arrays larger than this many bytes will be placed in the static data
+    // segment
     static constexpr uint64_t LARGE_ARRAY_BYTES_THRESHOLD = 1ull << 10; // 1KB
 
     llvm::LLVMContext Ctx;
@@ -964,9 +966,9 @@ CodeGenerator::TypedValue CodeGenerator::p_parse_primary() {
         } else {
             llvm::Type* elemType =
                 (it->second.type == VarType::FLOAT) ? F64 : I64;
-            return {Builder.CreateLoad(elemType, it->second.storage,
-                                       name + ".val"),
-                    it->second.type};
+            return {
+                Builder.CreateLoad(elemType, it->second.storage, name + ".val"),
+                it->second.type};
         }
     }
 
