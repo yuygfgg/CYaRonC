@@ -231,3 +231,10 @@ The test suite requires `lli` to be in your system's `PATH`.
 ```bash
 python3 test/run_tests.py
 ```
+
+## Examples
+
+Examples can be found in the `example` directory.
+
+1. [Segment Tree](example/segment_tree.cyaron)
+    * A simple segment tree implementation. Solution to [Luogu P3372](https://www.luogu.com.cn/problem/P3372).
